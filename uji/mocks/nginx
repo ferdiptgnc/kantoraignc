@@ -1,0 +1,13 @@
+#!/bin/sh
+# nginx tiruan: -t memakai nginx asli dengan konfigurasi uji yang meng-include kantorai.conf
+echo "nginx $*" >>"$MOCK_LOG"
+if [ "$1" = -t ]; then
+  cat >"$MOCK_STATE/nginx-main.conf" <<CONF
+pid $MOCK_STATE/nginx.pid;
+error_log $MOCK_STATE/nginx-error.log;
+events {}
+http { access_log off; include $KA_NGINX_CONF; }
+CONF
+  exec /usr/sbin/nginx -t -q -c "$MOCK_STATE/nginx-main.conf" -p "$MOCK_STATE"
+fi
+exit 0

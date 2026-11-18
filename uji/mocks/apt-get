@@ -1,0 +1,2 @@
+#!/bin/sh
+echo "apt-get $*" >>"$MOCK_LOG"; exit 0

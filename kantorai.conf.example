@@ -1,0 +1,47 @@
+# ============================================================================
+#  Contoh config instalasi tanpa dialog — GNC Kantor AI
+#  Pakai: bash install-kantorai.sh --unattended --config klien-a.conf
+#  Simpan file ini dengan aman (chmod 600): berisi token & password.
+#  Hapus file ini dari server setelah instalasi selesai.
+# ============================================================================
+
+KA_OFFICE_NAME="PT Contoh Klien"     # tampil di portal, panel, Kantor 3D
+KA_TZ="Asia/Jakarta"                 # Asia/Jakarta | Asia/Makassar | Asia/Jayapura | UTC
+
+# Akses web: local = hanya 127.0.0.1 (lewat SSH tunnel); lan = dari jaringan kantor + login
+KA_ACCESS_MODE="lan"
+KA_WEB_USER="admin"
+KA_WEB_PASS=""                       # kosong = dibuat acak, lihat /etc/kantorai/INSTALL-INFO.txt
+
+KA_PORTAL_PORT=8080
+KA_RUANG_PORT=3001                   # Kantor 3D (publik, lewat nginx)
+KA_RUANG_INTERNAL_PORT=3101          # Ruang di 127.0.0.1
+KA_DASH_PORT=9119                    # Panel Hermes
+
+# Komponen (yes/no)
+KA_WITH_DASHBOARD=yes
+KA_WITH_RUANG=yes
+KA_WITH_PORTAL=yes
+KA_WITH_PENGAWAS=yes
+KA_WITH_BROWSER=no                   # Chromium untuk tool browser agen (~1 GB)
+KA_WITH_CLOUDFLARED=no
+KA_CF_TOKEN=""                       # token Cloudflare Tunnel milik klien (bila yes)
+
+# Telegram bot admin (opsional; bisa diatur nanti lewat: kantorai -> Telegram)
+KA_TG_ADMIN_TOKEN=""                 # 123456789:AAH...
+KA_TG_USERS=""                       # user ID diizinkan, pisah koma: 111111111,222222222
+
+# Model AI. Mode tanpa dialog hanya menulis nilai di bawah; pemilihan paling
+# andal tetap lewat: kantorai model  (menu resmi Hermes).
+KA_MODEL_MODE="config"               # config | skip
+KA_MODEL_PROVIDER=""                 # contoh: openrouter | anthropic | nous
+KA_MODEL_NAME=""                     # contoh: anthropic/claude-sonnet-4.5
+KA_MODEL_KEY_VAR=""                  # contoh: OPENROUTER_API_KEY | ANTHROPIC_API_KEY
+KA_MODEL_KEY=""
+
+# Backup harian (07:05) oleh Pengawas
+KA_AUTO_BACKUP=yes
+KA_BACKUP_KEEP=7
+
+# Lanjutkan walau OS bukan Debian 12/13 atau Ubuntu 22.04/24.04
+# KA_FORCE_OS=1

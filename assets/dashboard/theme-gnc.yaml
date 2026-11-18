@@ -1,0 +1,69 @@
+# GNC Kantor AI — tema Panel Hermes (dashboard)
+# Dipasang ke ~/.hermes/dashboard-themes/gnc.yaml oleh kantorai.
+# Galura Nexa Core — Technology Infrastructure
+name: gnc
+label: GNC Professional
+description: Navy, biru GNC, dan aksen perunggu — tema resmi GNC Kantor AI
+
+palette:
+  background:
+    hex: "#07111f"
+    alpha: 1.0
+  midground:
+    hex: "#dbe7f7"
+    alpha: 1.0
+  foreground:
+    hex: "#ffffff"
+    alpha: 0.0
+  warmGlow: "rgba(30, 136, 255, 0.18)"
+  noiseOpacity: 0.35
+
+typography:
+  fontSans: '"Plus Jakarta Sans", "Segoe UI", system-ui, sans-serif'
+  fontMono: '"JetBrains Mono", ui-monospace, SFMono-Regular, monospace'
+  fontDisplay: '"Plus Jakarta Sans", "Segoe UI", system-ui, sans-serif'
+  fontUrl: "https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap"
+  baseSize: "15px"
+  lineHeight: "1.55"
+  letterSpacing: "-0.005em"
+
+layout:
+  radius: "0.6rem"
+  density: comfortable
+
+layoutVariant: standard
+
+componentStyles:
+  card:
+    background: "linear-gradient(180deg, rgba(16, 32, 58, 0.92), rgba(9, 20, 38, 0.95))"
+    boxShadow: "inset 0 0 0 1px rgba(120, 170, 235, 0.14), 0 8px 24px rgba(0, 0, 0, 0.25)"
+  header:
+    background: "linear-gradient(180deg, rgba(8, 22, 44, 0.98), rgba(7, 17, 31, 0.94))"
+    boxShadow: "0 1px 0 rgba(120, 170, 235, 0.12)"
+  footer:
+    background: "rgba(7, 17, 31, 0.9)"
+
+colorOverrides:
+  primary: "#1e88ff"
+  primaryForeground: "#ffffff"
+  accent: "#c9a26b"
+  accentForeground: "#07111f"
+  ring: "#1e88ff"
+  success: "#2fbf71"
+  warning: "#e8a23a"
+  destructive: "#e5484d"
+  border: "rgba(120, 170, 235, 0.16)"
+
+customCSS: |
+  /* Garis brand GNC (biru → perunggu) di atas halaman */
+  body::before {
+    content: "";
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    height: 3px;
+    z-index: 60;
+    pointer-events: none;
+    background: linear-gradient(90deg, #1e88ff 0%, #4aa3ff 45%, #c9a26b 100%);
+  }
+  ::selection { background: rgba(30, 136, 255, 0.35); }
+  a { text-underline-offset: 3px; }

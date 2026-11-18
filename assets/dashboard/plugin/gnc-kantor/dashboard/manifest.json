@@ -1,0 +1,12 @@
+{
+  "name": "gnc-kantor",
+  "label": "Kantor",
+  "description": "GNC Kantor AI — ringkasan kantor, karyawan AI, layanan, dan tautan Kantor 3D (Galura Nexa Core).",
+  "icon": "Activity",
+  "version": "1.0.0",
+  "tab": { "path": "/kantor", "position": "before:sessions" },
+  "slots": ["header-left", "footer-right"],
+  "entry": "dist/index.js",
+  "css": "dist/style.css",
+  "api": "plugin_api.py"
+}

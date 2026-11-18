@@ -1,0 +1,29 @@
+/* GNC Kantor AI — branding yang disisipkan nginx ke Kantor 3D (Ruang). Tidak mengubah kode Ruang. */
+#gnc-badge {
+  position: fixed; left: 14px; bottom: 14px; z-index: 2147483000;
+  display: flex; align-items: center; gap: 10px; max-width: min(360px, calc(100vw - 28px));
+  padding: 8px 12px 8px 8px; border-radius: 14px;
+  background: rgba(7, 17, 31, 0.86); color: #e6eefb;
+  border: 1px solid rgba(120, 170, 235, 0.25); box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  font: 500 12px/1.3 "Plus Jakarta Sans", "Segoe UI", system-ui, sans-serif;
+  transition: opacity .2s, transform .2s;
+}
+#gnc-badge::before {
+  content: ""; position: absolute; left: 12px; right: 12px; top: -1px; height: 2px; border-radius: 2px;
+  background: linear-gradient(90deg, #1e88ff, #4aa3ff 45%, #c9a26b);
+}
+#gnc-badge img { width: 30px; height: 30px; border-radius: 8px; flex: none; object-fit: contain; }
+#gnc-badge .gnc-t { font-weight: 800; letter-spacing: .01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#gnc-badge .gnc-s { color: #8fa3c0; font-size: 10.5px; white-space: nowrap; }
+#gnc-badge a { color: #8fa3c0; text-decoration: none; }
+#gnc-badge a:hover { color: #4aa3ff; }
+#gnc-badge button {
+  margin-left: 4px; border: 0; background: transparent; color: #8fa3c0; cursor: pointer;
+  font-size: 14px; line-height: 1; padding: 4px; border-radius: 6px;
+}
+#gnc-badge button:hover { background: rgba(255, 255, 255, 0.08); color: #fff; }
+#gnc-badge.gnc-min { padding: 6px; gap: 0; }
+#gnc-badge.gnc-min .gnc-txt, #gnc-badge.gnc-min button { display: none; }
+#gnc-badge.gnc-min img { cursor: pointer; }
+@media (max-width: 640px) { #gnc-badge .gnc-s { display: none; } }

@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Hermes tiruan untuk pengujian GNC Kantor AI. Mencatat semua pemanggilan.
+echo "hermes $*" >>"${MOCK_LOG:?}"
+prof=default
+if [[ ${1:-} == -p ]]; then prof=$2; shift 2; fi
+home() { if [[ $1 == default ]]; then echo "$HERMES_HOME"; else echo "$HERMES_HOME/profiles/$1"; fi; }
+H=$(home "$prof"); mkdir -p "$H"
+case ${1:-} in
+  --version) echo "Hermes Agent v0.99.0 (tiruan)" ;;
+  profile)
+    case $2 in
+      create)
+        n=$3; shift 3; desc=""; noskills=0
+        while (($#)); do case $1 in --description) desc=$2; shift ;; --no-skills) noskills=1 ;; esac; shift; done
+        d="$HERMES_HOME/profiles/$n"; [[ -d $d ]] && { echo "exists" >&2; exit 1; }
+        mkdir -p "$d/logs" "$d/memories"
+        printf 'description: %s\n' "$desc" >"$d/profile.yaml"
+        printf 'model:\n  default: mock-model\n  provider: mock\n' >"$d/config.yaml"
+        grep -v '^TELEGRAM_' "$HERMES_HOME/.env" 2>/dev/null | grep -v '^HERMES_DASHBOARD' >"$d/.env"; chmod 600 "$d/.env"
+        ((noskills)) && touch "$d/.no-bundled-skills"
+        echo "SOUL bawaan" >"$d/SOUL.md"
+        mkdir -p "$(dirname "$HERMES_BIN")"; printf '#!/bin/sh\nexec hermes -p %s "$@"\n' "$n" >"$(dirname "$HERMES_BIN")/$n"; chmod +x "$(dirname "$HERMES_BIN")/$n" ;;
+      delete) rm -rf "$HERMES_HOME/profiles/$3" "$(dirname "$HERMES_BIN")/$3" ;;
+      export) n=$3; out=$5; tar -czf "$out" -C "$HERMES_HOME/profiles" "$n" ;;
+      describe) n=$3; printf 'description: %s\n' "$5" >"$HERMES_HOME/profiles/$n/profile.yaml" ;;
+      list) ls "$HERMES_HOME/profiles" ;;
+    esac ;;
+  config)
+    if [[ $2 == set ]]; then
+      k=$3; v=$4
+      if [[ $k =~ ^[A-Z] ]]; then echo "$k=$v" >>"$H/.env"; else echo "$k=$v" >>"$H/config.set.log"; fi
+      [[ $k == model.default ]] && printf 'model:\n  default: %s\n' "$v" >"$H/config.yaml"
+    fi ;;
+  gateway)
+    case $2 in
+      install) mkdir -p "$KA_SYSTEMD_DIR"; echo "[Service]" >"$KA_SYSTEMD_DIR/hermes-gateway.service"; systemctl start hermes-gateway ;;
+      restart) [[ -n ${MOCK_GATEWAY_RESTART_FAIL:-} ]] && exit 1; systemctl restart hermes-gateway ;;
+      stop) systemctl stop hermes-gateway ;;
+      status) echo "gateway: $(systemctl is-active hermes-gateway)" ;;
+      uninstall) rm -f "$KA_SYSTEMD_DIR/hermes-gateway.service" ;;
+    esac ;;
+  plugins) echo "plugin $3 enabled" ;;
+  backup) out=""; while (($#)); do [[ $1 == -o ]] && out=$2; shift; done; mkdir -p "$(dirname "$out")"; echo "zip-tiruan" >"$out" ;;
+  import) echo "imported $2" ;;
+  model) echo "pemilih model (tiruan)" ;;
+  chat) echo "Halo, saya karyawan $prof (tiruan)." ;;
+  doctor|status|update|skills|logs) echo "ok ($1)" ;;
+  *) echo "perintah tiruan: $*" ;;
+esac
+exit 0

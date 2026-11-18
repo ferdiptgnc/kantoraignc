@@ -1,0 +1,2 @@
+#!/bin/sh
+echo "cloudflared $*" >>"$MOCK_LOG"; touch "$MOCK_STATE/cloudflared"; exit 0

@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# systemctl tiruan: status unit disimpan di $MOCK_STATE/units
+D="${MOCK_STATE:?}/units"; mkdir -p "$D"
+echo "systemctl $*" >>"$MOCK_LOG"
+norm() { local u=$1; [[ $u == *.* ]] || u="$u.service"; echo "$u"; }
+setst() { local u; u=$(norm "$1"); if [[ $2 == active && " ${MOCK_FAIL_UNITS:-} " == *" ${1%.service} "* ]]; then echo failed >"$D/$u"; return 1; fi; echo "$2" >"$D/$u"; }
+known() { local u; u=$(norm "$1"); [[ -f $KA_SYSTEMD_DIR/$u || $u == nginx.service || $u == cloudflared.service && -f $MOCK_STATE/cloudflared ]]; }
+cmd=$1; shift
+now=0; units=()
+for a in "$@"; do case $a in --now) now=1 ;; -*) ;; *) units+=("$a") ;; esac; done
+rc=0
+case $cmd in
+  is-active) u=$(norm "${units[0]}"); s=$(cat "$D/$u" 2>/dev/null || echo inactive); echo "$s"; [[ $s == active ]] || rc=3 ;;
+  cat) known "${units[0]}" || rc=1 ;;
+  start|restart|reload) for u in "${units[@]}"; do setst "$u" active || rc=1; done ;;
+  stop) for u in "${units[@]}"; do setst "$u" inactive; done ;;
+  enable) ((now)) && for u in "${units[@]}"; do setst "$u" active || rc=1; done ;;
+  disable) ((now)) && for u in "${units[@]}"; do setst "$u" inactive; done ;;
+  daemon-reload|show-environment) ;;
+esac
+exit $rc

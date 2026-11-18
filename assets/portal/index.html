@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kantor AI</title>
+  <link rel="icon" href="logo-gnc.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap">
+  <link rel="stylesheet" href="portal.css">
+</head>
+<body>
+  <div class="bg-grid" aria-hidden="true"></div>
+  <header class="top">
+    <div class="brand">
+      <img src="logo-gnc.svg" alt="" class="brand-mark">
+      <div>
+        <div class="brand-name">GNC Kantor AI</div>
+        <div class="brand-sub">Galura Nexa Core</div>
+      </div>
+    </div>
+    <div class="clock" id="clock">--:--</div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <img id="client-logo" class="client-logo" alt="" hidden>
+      <div>
+        <p class="eyebrow">Kantor AI</p>
+        <h1 id="office">Kantor AI</h1>
+        <p class="lead">Karyawan AI bekerja 24 jam: menjawab lewat Telegram, menjalankan tugas terjadwal, dan melapor ke tim.</p>
+      </div>
+    </section>
+
+    <section class="doors">
+      <a class="door door-3d" id="door-ruang" href="#" target="_blank" rel="noopener">
+        <span class="door-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M12 2 3 7v10l9 5 9-5V7l-9-5Zm0 2.3L18.7 8 12 11.7 5.3 8 12 4.3ZM5 9.7l6 3.3v6.6l-6-3.3V9.7Zm8 9.9V13l6-3.3v6.6l-6 3.3Z"/></svg>
+        </span>
+        <span class="door-title">Kantor 3D</span>
+        <span class="door-text">Lihat karyawan AI bekerja di kantor virtual, papan tugas, jadwal, dan log.</span>
+        <span class="door-go">Masuk →</span>
+      </a>
+      <a class="door door-panel" id="door-panel" href="#" target="_blank" rel="noopener">
+        <span class="door-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M4 4h16a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1Zm1 2v12h14V6H5Zm2 2h4v4H7V8Zm6 0h4v2h-4V8Zm0 4h4v2h-4v-2Zm-6 2h4v2H7v-2Z"/></svg>
+        </span>
+        <span class="door-title">Panel Hermes</span>
+        <span class="door-text">Atur model, kunci API, skill, jadwal, dan percakapan setiap karyawan.</span>
+        <span class="door-go">Buka panel →</span>
+      </a>
+    </section>
+
+    <section class="board">
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Karyawan AI</h2>
+          <span class="pill" id="crew-count">–</span>
+        </div>
+        <ul class="crew" id="crew"><li class="muted">Memuat…</li></ul>
+      </div>
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Status layanan</h2>
+          <span class="pill" id="svc-summary">–</span>
+        </div>
+        <ul class="svc" id="svc"><li class="muted">Memuat…</li></ul>
+        <div class="meters">
+          <div class="meter"><span>Disk</span><div class="bar"><i id="disk-bar"></i></div><b id="disk">–</b></div>
+          <div class="meter"><span>RAM</span><div class="bar"><i id="mem-bar"></i></div><b id="mem">–</b></div>
+        </div>
+        <p class="stamp" id="stamp">Menunggu data Pengawas…</p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <span>GNC Kantor AI <span id="version"></span> · Galura Nexa Core — Technology Infrastructure</span>
+    <span class="credit">Mesin: Hermes Agent (Nous Research) · Kantor 3D: Ruang (MIT)</span>
+  </footer>
+
+  <script src="portal.js"></script>
+</body>
+</html>

@@ -1,0 +1,2 @@
+#!/bin/sh
+echo "timedatectl $*" >>"$MOCK_LOG"; exit 0

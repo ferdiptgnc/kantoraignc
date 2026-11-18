@@ -1,0 +1,958 @@
+#!/usr/bin/env bash
+#
+# ============================================================================
+#  kantorai — Menu pengelolaan GNC Kantor AI
+#  Galura Nexa Core — Technology Infrastructure
+# ============================================================================
+#  Dipasang oleh install-kantorai.sh ke /usr/local/bin/kantorai.
+#
+#  Pemakaian (root):
+#    kantorai                         menu interaktif
+#    kantorai status                  ringkasan status kantor
+#    kantorai restart [semua|gateway|panel|kantor3d|nginx]
+#    kantorai karyawan [daftar|tambah|hapus NAMA]
+#    kantorai model [NAMA]            pilih model AI (default = admin)
+#    kantorai logs [gateway|errors|panel|kantor3d|pengawas|installer|NAMA]
+#    kantorai backup                  backup sekarang
+#    kantorai restore FILE.zip        pulihkan dari backup
+#    kantorai pengawas [periksa|uji|status]
+#    kantorai web [lokal|lan|password]
+#    kantorai update [hermes|kantor3d|self]
+#    kantorai doctor                  diagnosa
+#    kantorai info                    alamat & info instalasi
+#    kantorai uninstall               hapus GNC Kantor AI
+#
+#  Sumber: https://github.com/ferdiptgnc/kantoraignc
+# ============================================================================
+
+set -uo pipefail
+
+KA_LIBDIR=${KA_LIBDIR:-/usr/local/lib/kantorai}
+# shellcheck source=lib/common.sh
+. "$KA_LIBDIR/common.sh" || { echo "GNC Kantor AI belum terpasang lengkap ($KA_LIBDIR/common.sh)." >&2; exit 1; }
+# shellcheck source=lib/setup.sh
+. "$KA_LIBDIR/setup.sh"
+
+need_root() { [[ $EUID -eq 0 ]] || die "Jalankan sebagai root (sudo -i)."; }
+ensure_tui() {
+  # KA_PLAIN=1: menu teks biasa tanpa whiptail (terminal sederhana / pengujian)
+  [[ ${KA_PLAIN:-0} == 1 ]] && { TUI=0; return 0; }
+  command -v whiptail >/dev/null 2>&1 || die "whiptail tidak ada. Pasang: apt-get install -y whiptail"
+  [[ -t 0 && -t 1 ]] || die "Menu butuh terminal interaktif. Lihat: kantorai help"
+  TUI=1
+}
+
+# ---------------------------------------------------------------------------
+# Status
+# ---------------------------------------------------------------------------
+fmt_state() {
+  case $1 in
+    active) printf 'aktif' ;; inactive) printf 'berhenti' ;; failed) printf 'GAGAL' ;;
+    activating) printf 'memulai' ;; "") printf 'tidak terpasang' ;; *) printf '%s' "$1" ;;
+  esac
+}
+unit_line() { # unit label [url]
+  local s=""
+  systemctl cat "$1" >/dev/null 2>&1 && s=$(svc_state "$1")
+  printf '  %-24s %-15s %s\n' "$2" "$(fmt_state "$s")" "${3:-}"
+}
+crew_lines() {
+  local p desc model bot envf
+  for p in default $(list_profiles); do
+    envf=$(profile_env "$p")
+    desc=$(profile_desc "$p"); [[ $p == default ]] && desc=${desc:-asisten utama & admin}
+    model=$(profile_model "$p")
+    bot="-"; [[ -n $(envget "$envf" TELEGRAM_BOT_TOKEN) ]] && bot="bot ✓"
+    printf '  %-14s %-7s %-22.22s %s\n' "$p" "$bot" "${model:-(model admin)}" "$desc"
+  done
+}
+status_text() {
+  local host ip disk mem up hv
+  host=$(hostname); ip=$(local_ip)
+  disk=$(df -P / | awk 'NR==2{print $5}')
+  mem=$(awk '/^MemTotal/{t=$2} /^MemAvailable/{a=$2} END{printf "%d%%", (t-a)*100/t}' /proc/meminfo)
+  up=$(uptime -p 2>/dev/null | sed 's/^up //')
+  hv=$(hermes_ok && hm --version 2>/dev/null | head -1)
+  local h; if [[ $KA_ACCESS_MODE == lan ]]; then h=$ip; else h=127.0.0.1; fi
+  printf 'GNC Kantor AI v%s · %s\n' "$KA_VERSION" "$KA_OFFICE_NAME"
+  printf 'Server : %s (%s) · uptime %s · disk %s · RAM %s\n' "$host" "$ip" "${up:-?}" "$disk" "$mem"
+  printf 'Hermes : %s\n' "${hv:-TIDAK DITEMUKAN}"
+  printf 'Akses  : %s\n\n' "$([[ $KA_ACCESS_MODE == lan ]] && echo "LAN (login $KA_WEB_USER)" || echo "lokal / SSH tunnel")"
+  printf 'Layanan:\n'
+  unit_line "$KA_GATEWAY_UNIT" "Gateway Hermes"
+  [[ $KA_WITH_DASHBOARD == yes ]] && unit_line "$KA_DASH_UNIT" "Panel Hermes" "${KA_URL_DASHBOARD:-http://$h:$KA_DASH_PORT}"
+  [[ $KA_WITH_RUANG == yes ]] && unit_line "$KA_RUANG_UNIT" "Kantor 3D" "${KA_URL_RUANG:-http://$h:$KA_RUANG_PORT}"
+  [[ $KA_WITH_PORTAL == yes ]] && unit_line nginx "Portal (nginx)" "${KA_URL_PORTAL:-http://$h:$KA_PORTAL_PORT}"
+  [[ $KA_WITH_PENGAWAS == yes ]] && unit_line "$KA_PENGAWAS_UNIT.timer" "Pengawas (timer)"
+  [[ $KA_WITH_CLOUDFLARED == yes ]] && unit_line cloudflared "Cloudflare Tunnel"
+  printf '\nKaryawan AI:\n'
+  crew_lines
+  if [[ -n $KA_TG_GROUP_ID ]]; then printf '\nGrup Telegram kantor: %s\n' "$KA_TG_GROUP_ID"; fi
+}
+do_status() {
+  if ((TUI)); then
+    local t; t=$(mktemp); status_text >"$t"; ui_text "Status kantor" "$t"; rm -f "$t"
+  else status_text; fi
+}
+
+# ---------------------------------------------------------------------------
+# Layanan
+# ---------------------------------------------------------------------------
+restart_target() {
+  case ${1:-semua} in
+    gateway) ui_info "Restart gateway (menunggu percakapan yang sedang berjalan selesai)..."; gateway_restart ;;
+    panel|dashboard) systemctl restart "$KA_DASH_UNIT" ;;
+    kantor3d|ruang) systemctl restart "$KA_RUANG_UNIT" ;;
+    nginx|portal) ka_nginx_reload ;;
+    semua|all)
+      ui_info "Restart semua layanan..."
+      gateway_restart
+      [[ $KA_WITH_DASHBOARD == yes ]] && systemctl restart "$KA_DASH_UNIT"
+      [[ $KA_WITH_RUANG == yes ]] && systemctl restart "$KA_RUANG_UNIT"
+      ka_nginx_reload ;;
+    *) errp "Target tidak dikenal: $1 (semua|gateway|panel|kantor3d|nginx)"; return 2 ;;
+  esac
+}
+m_layanan() {
+  local c
+  while c=$(ui_menu "Layanan" "Kelola layanan kantor:" \
+        1 "Restart SEMUA layanan" \
+        2 "Restart gateway Hermes (bot Telegram)" \
+        3 "Restart Panel Hermes" \
+        4 "Restart Kantor 3D" \
+        5 "Reload nginx (portal)" \
+        6 "Hentikan gateway (semua bot diam)" \
+        7 "Jalankan gateway" \
+        8 "Pasang ulang service gateway" \
+        9 "Status gateway (detail)"); do
+    case $c in
+      1) restart_target semua && ui_msg "Selesai" "Semua layanan di-restart." 8 ;;
+      2) restart_target gateway && ui_msg "Selesai" "Gateway di-restart." 8 || ui_msg "Gagal" "Restart gateway gagal. Lihat Log -> gateway." 8 ;;
+      3) restart_target panel && ui_msg "Selesai" "Panel Hermes di-restart." 8 ;;
+      4) restart_target kantor3d && ui_msg "Selesai" "Kantor 3D di-restart." 8 ;;
+      5) restart_target nginx && ui_msg "Selesai" "nginx di-reload." 8 ;;
+      6) ui_yesno "Hentikan gateway" "Semua karyawan AI berhenti membalas Telegram dan jadwal (cron) tidak jalan.\nLanjutkan?" no \
+           && { hm gateway stop --system -y >>"$KA_LOG" 2>&1 || systemctl stop "$KA_GATEWAY_UNIT"; ui_msg "Selesai" "Gateway dihentikan." 8; } ;;
+      7) systemctl start "$KA_GATEWAY_UNIT" && ui_msg "Selesai" "Gateway dijalankan." 8 ;;
+      8) ui_run "Pasang ulang gateway" hm gateway install --system --run-as-user root --force --start-now --start-on-login ;;
+      9) ui_run "Status gateway" hm gateway status --system ;;
+    esac
+  done
+}
+
+# ---------------------------------------------------------------------------
+# Karyawan AI
+# ---------------------------------------------------------------------------
+pick_profile() { # pick_profile "Teks" [with_default]  -> nama
+  local items=() p desc
+  [[ ${2:-} == default ]] && items+=(default "Asisten utama & admin")
+  for p in $(list_profiles); do desc=$(profile_desc "$p"); items+=("$p" "${desc:-(tanpa jabatan)}"); done
+  if ((${#items[@]} == 0)); then ui_msg "Belum ada karyawan" "Belum ada karyawan AI. Tambahkan dulu lewat menu Karyawan AI -> Tambah." 9; return 1; fi
+  ui_menu "Pilih karyawan" "$1" "${items[@]}"
+}
+
+token_in_use() { # token_in_use TOKEN [kecuali_profil] -> nama profil pemakai
+  local p
+  for p in default $(list_profiles); do
+    [[ $p == "${2:-}" ]] && continue
+    [[ $(envget "$(profile_env "$p")" TELEGRAM_BOT_TOKEN) == "$1" ]] && { printf '%s' "$p"; return 0; }
+  done
+  return 1
+}
+
+# ask_bot_token VAR NAMA_PROFIL  -> token valid & belum dipakai profil lain
+ask_bot_token() {
+  local __v=$1 prof=$2 _tok _uname _owner
+  while true; do
+    ui_secret _tok "Token bot @$prof" \
+"Buat bot baru di @BotFather (/newbot), lalu tempel tokennya di sini.
+Satu karyawan = satu bot. Token tidak ditampilkan di layar.
+
+Kosongkan untuk melewati (bot bisa diatur nanti)." || return 1
+    [[ -z $_tok ]] && { printf -v "$__v" '%s' ""; return 0; }
+    valid_bot_token "$_tok" || { ui_msg "Token tidak valid" "Format token: 123456789:AAH... (dari @BotFather)." 8; continue; }
+    if _owner=$(token_in_use "$_tok" "$prof"); then
+      ui_msg "Token sudah dipakai" "Token ini sudah dipakai karyawan '$_owner'.\nSatu bot hanya boleh untuk satu karyawan (kalau tidak, gateway menolak start)." 10; continue
+    fi
+    ui_info "Memeriksa token ke Telegram..."
+    if _uname=$(tg_bot_username "$_tok"); then
+      ui_msg "Bot ditemukan" "Token valid: @$_uname" 8
+      printf -v "$__v" '%s' "$_tok"; BOT_USERNAME=$_uname; return 0
+    fi
+    ui_yesno "Token belum bisa dicek" "Telegram menolak token ini, atau server tidak bisa menghubungi api.telegram.org.\nTetap pakai token ini?" no \
+      && { printf -v "$__v" '%s' "$_tok"; BOT_USERNAME=""; return 0; }
+  done
+}
+
+write_soul() { # write_soul NAMA JABATAN TUGAS
+  local f; f="$(profile_home "$1")/SOUL.md"
+  NAMA=$1 JABATAN=$2 TUGAS=$3 KANTOR=$KA_OFFICE_NAME awk '
+    { gsub(/\{\{NAMA\}\}/, ENVIRON["NAMA"]); gsub(/\{\{JABATAN\}\}/, ENVIRON["JABATAN"]);
+      gsub(/\{\{TUGAS\}\}/, ENVIRON["TUGAS"]); gsub(/\{\{KANTOR\}\}/, ENVIRON["KANTOR"]); print }' \
+    "$KA_HOME/assets/templates/SOUL.md.tpl" >"$f"
+}
+
+apply_bot_to_profile() { # apply_bot_to_profile NAMA TOKEN
+  local envf users; envf=$(profile_env "$1")
+  envset "$envf" TELEGRAM_BOT_TOKEN "$2"
+  users=$(envget "$(profile_env default)" TELEGRAM_ALLOWED_USERS)
+  if [[ -n $users ]]; then
+    envset "$envf" TELEGRAM_ALLOWED_USERS "$users"
+    [[ -n $(envget "$envf" TELEGRAM_HOME_CHANNEL) ]] || envset "$envf" TELEGRAM_HOME_CHANNEL "${users%%,*}"
+  fi
+}
+
+do_add_employee() {
+  local name="" jabatan="" tugas="" tok="" args=() thread=""
+  BOT_USERNAME=""
+  ui_input name "Tambah karyawan (1/5)" \
+"Nama profil karyawan (huruf kecil, angka, - atau _; diawali huruf).
+Nama ini juga jadi perintah terminal, contoh: sekretaris, sales, noc" \
+    "" valid_profile "Nama tidak valid atau dipakai sistem. Contoh: sekretaris, sales_1, noc" || return 0
+  if profile_exists "$name"; then ui_msg "Sudah ada" "Karyawan '$name' sudah ada." 8; return 0; fi
+  # Hermes membuat perintah /root/.local/bin/<nama>; jangan sampai menutupi perintah sistem (curl, nano, ...)
+  local sys_cmd; sys_cmd=$(type -P "$name" 2>/dev/null || true)
+  if [[ -n $sys_cmd && $sys_cmd != "$KA_ROOT_HOME/.local/bin/"* ]]; then
+    ui_msg "Nama bentrok" "Nama '$name' sama dengan perintah sistem ($sys_cmd).\nPilih nama lain, misalnya '${name}_ai'." 9; return 0
+  fi
+  ui_input jabatan "Tambah karyawan (2/5)" "Jabatan singkat, contoh: Sekretaris kantor, Admin penjualan, Teknisi NOC:" \
+    "" valid_nonempty "Jabatan wajib diisi." || return 0
+  ui_input tugas "Tambah karyawan (3/5)" \
+"Tugas utamanya dalam satu-dua kalimat (bisa disempurnakan nanti di SOUL.md):
+Contoh: Merangkum email masuk setiap pagi dan mengingatkan tenggat penawaran." \
+    "" valid_nonempty "Tugas wajib diisi." || return 0
+  args=(profile create "$name" --description "$jabatan")
+  ui_yesno "Tambah karyawan (4/5)" \
+"Aktifkan skill bawaan Hermes untuk '$name'?
+
+Yes = skill bawaan aktif (riset web, dokumen, kode, dll).
+No  = profil kosong tanpa skill, cocok untuk karyawan dengan tugas sempit." || args+=(--no-skills)
+
+  ui_info "Membuat profil $name..."
+  if ! hm "${args[@]}" </dev/null >>"$KA_LOG" 2>&1 || ! profile_exists "$name"; then
+    ui_msg "Gagal" "Profil gagal dibuat. Lihat: kantorai logs installer" 8; return 1
+  fi
+  write_soul "$name" "$jabatan" "$tugas"
+
+  ask_bot_token tok "$name" || tok=""
+  [[ -n $tok ]] && apply_bot_to_profile "$name" "$tok"
+
+  if [[ -n $tok && -n $KA_TG_GROUP_ID ]]; then
+    if ui_yesno "Topik grup" "Buat topik baru bernama '$jabatan' di grup kantor untuk $name?\n\n(Bot admin harus admin grup dengan izin 'Manage Topics'.)"; then
+      thread=$(create_topic "$jabatan") && apply_topics "$name" "$thread" \
+        || ui_msg "Topik gagal dibuat" "Topik belum bisa dibuat. Atur nanti di Telegram -> Topik karyawan." 9
+    fi
+  fi
+
+  if ui_yesno "Tambah karyawan (5/5)" "Model AI '$name' saat ini sama dengan admin.\n\nPilih model lain sekarang?" no; then
+    run_tty hm -p "$name" model
+  fi
+  ui_info "Restart gateway agar $name mulai bekerja..."
+  gateway_restart >>"$KA_LOG" 2>&1 || true
+  "$KA_LIBDIR/pengawas.sh" periksa --diam >/dev/null 2>&1 || true
+
+  local msg
+  msg="Karyawan '$name' ($jabatan) sudah dibuat.
+
+Perintah terminal : $name   (contoh: $name chat)
+Kepribadian       : $(profile_home "$name")/SOUL.md"
+  if [[ -n $tok ]]; then
+    msg+="
+Bot Telegram      : ${BOT_USERNAME:+@$BOT_USERNAME}
+
+Langkah di Telegram:
+  1. @BotFather -> /mybots -> bot ini -> Bot Settings -> Group Privacy -> Turn off
+  2. Masukkan bot ke grup kantor dan jadikan admin (bila memakai grup)
+  3. Kirim /start ke bot lewat DM untuk uji"
+    [[ -n $thread ]] && msg+="
+  4. Bot akan menjawab di topik baru (ID $thread)"
+  else
+    msg+="
+
+Bot Telegram belum diatur: Karyawan AI -> Ganti token bot."
+  fi
+  ui_msg "Karyawan ditambahkan" "$msg" 22
+}
+
+do_delete_employee() {
+  local name=${1:-} conf out
+  [[ -n $name ]] || name=$(pick_profile "Karyawan yang akan DIHAPUS:") || return 0
+  profile_exists "$name" && [[ $name != default ]] || { ui_msg "Tidak ada" "Karyawan '$name' tidak ditemukan." 8; return 1; }
+  ui_yesno "Hapus karyawan" "Hapus karyawan '$name' beserta memori, sesi, skill, dan jadwalnya?\n\nArsip cadangan profil disimpan dulu di $KA_BACKUP_DIR." no || return 0
+  if ((TUI)); then
+    conf=$(whiptail --backtitle "$BT" --title "Konfirmasi" --inputbox "Ketik nama karyawan ($name) untuk konfirmasi:" 10 "$W" 3>&1 1>"$KA_TTY" 2>&3) || return 0
+    [[ $conf == "$name" ]] || { ui_msg "Batal" "Nama tidak cocok, tidak ada yang dihapus." 8; return 0; }
+  fi
+  mkdir -p "$KA_BACKUP_DIR"
+  out="$KA_BACKUP_DIR/profil-$name-$(date +%Y%m%d-%H%M%S).tar.gz"
+  ui_info "Mengarsipkan profil $name..."
+  hm profile export "$name" -o "$out" >>"$KA_LOG" 2>&1 && chmod 600 "$out" || out=""
+  if hm profile delete "$name" -y >>"$KA_LOG" 2>&1; then
+    gateway_restart >>"$KA_LOG" 2>&1 || true
+    ui_msg "Dihapus" "Karyawan '$name' dihapus.${out:+\nArsip: $out\n(Pulihkan dengan: hermes profile import $out)}" 11
+  else
+    ui_msg "Gagal" "Gagal menghapus '$name'. Lihat: kantorai logs installer" 8
+  fi
+}
+
+do_edit_soul() {
+  local name f desc
+  name=$(pick_profile "Ubah jabatan & kepribadian karyawan:" default) || return 0
+  f="$(profile_home "$name")/SOUL.md"
+  desc=$(profile_desc "$name")
+  if [[ $name != default ]] && ui_input desc "Jabatan" "Jabatan singkat '$name':" "$desc" valid_nonempty; then
+    hm profile describe "$name" --text "$desc" >>"$KA_LOG" 2>&1 || true
+  fi
+  ui_msg "Edit SOUL.md" "File kepribadian & aturan '$name' akan dibuka di editor nano.\n\nSimpan: Ctrl+O lalu Enter · Keluar: Ctrl+X\nPerubahan berlaku di percakapan baru (/new) setelah gateway di-restart." 11
+  run_tty nano "$f"
+  ui_yesno "Restart gateway" "Restart gateway sekarang agar perubahan langsung berlaku?" && gateway_restart >>"$KA_LOG" 2>&1
+}
+
+do_change_token() {
+  local name tok
+  name=$(pick_profile "Ganti token bot Telegram untuk:" default) || return 0
+  BOT_USERNAME=""
+  ask_bot_token tok "$name" || return 0
+  if [[ -z $tok ]]; then
+    ui_yesno "Lepas bot" "Lepas bot Telegram dari '$name'? (karyawan tetap ada, hanya tidak terhubung ke Telegram)" no || return 0
+    envdel "$(profile_env "$name")" TELEGRAM_BOT_TOKEN
+  else
+    apply_bot_to_profile "$name" "$tok"
+  fi
+  gateway_restart >>"$KA_LOG" 2>&1 || true
+  ui_msg "Selesai" "Token bot '$name' diperbarui dan gateway di-restart." 8
+}
+
+do_test_chat() {
+  local name q
+  name=$(pick_profile "Uji jawaban karyawan:" default) || return 0
+  ui_input q "Uji chat" "Pertanyaan untuk $name:" "Perkenalkan dirimu dan tugasmu dalam 3 kalimat." valid_nonempty || return 0
+  ui_info "Menunggu jawaban $name (bisa 10-60 detik)..."
+  ui_run "Jawaban $name" timeout 180 hm -p "$name" chat -Q -q "$q"
+}
+
+m_karyawan() {
+  local c n
+  while c=$(ui_menu "Karyawan AI" "Kelola karyawan AI (satu karyawan = satu profil Hermes + satu bot):" \
+        1 "Daftar karyawan" \
+        2 "Tambah karyawan" \
+        3 "Ubah jabatan & kepribadian (SOUL.md)" \
+        4 "Ganti model AI karyawan" \
+        5 "Ganti / lepas token bot Telegram" \
+        6 "Uji jawaban karyawan" \
+        7 "Chat langsung di terminal" \
+        8 "Skill karyawan (katalog Hermes)" \
+        9 "Hapus karyawan"); do
+    case $c in
+      1) local t; t=$(mktemp); { printf '  %-14s %-7s %-22s %s\n' NAMA BOT MODEL JABATAN; crew_lines; } >"$t"; ui_text "Daftar karyawan" "$t"; rm -f "$t" ;;
+      2) do_add_employee ;;
+      3) do_edit_soul ;;
+      4) n=$(pick_profile "Ganti model AI untuk:" default) && run_tty hm -p "$n" model && gateway_restart >>"$KA_LOG" 2>&1 ;;
+      5) do_change_token ;;
+      6) do_test_chat ;;
+      7) n=$(pick_profile "Chat langsung dengan:" default) && run_tty hm -p "$n" ;;
+      8) n=$(pick_profile "Kelola skill untuk:" default) && run_tty hm -p "$n" skills browse ;;
+      9) do_delete_employee ;;
+    esac
+  done
+}
+
+# ---------------------------------------------------------------------------
+# Telegram: grup forum & topik
+# ---------------------------------------------------------------------------
+admin_token() { envget "$(profile_env default)" TELEGRAM_BOT_TOKEN; }
+
+# Deteksi ID grup: hentikan gateway sebentar, baca getUpdates bot admin (tanpa
+# mengonfirmasi update, jadi pesan tetap diterima Hermes setelah gateway jalan).
+detect_group() {
+  local tok j end ids
+  tok=$(admin_token); [[ -n $tok ]] || { ui_msg "Bot admin belum ada" "Atur dulu token bot admin." 8; return 1; }
+  ui_yesno "Deteksi grup" \
+"Langkah:
+  1. Buat grup Telegram, aktifkan Topics (Edit grup -> Topics).
+  2. Masukkan bot admin ke grup, jadikan admin (izin Manage Topics).
+  3. Pilih Yes, lalu dalam 90 detik kirim pesan apa saja di grup itu.
+
+Gateway dihentikan sebentar selama deteksi (bot diam maksimal 90 detik)." || return 1
+  hm gateway stop --system -y >>"$KA_LOG" 2>&1 || systemctl stop "$KA_GATEWAY_UNIT"
+  end=$(( $(date +%s) + 90 )); ids=""
+  while (( $(date +%s) < end )); do
+    ((TUI)) && whiptail --backtitle "$BT" --title "Deteksi grup" --infobox "Menunggu pesan di grup... sisa $(( end - $(date +%s) )) detik" 7 "$W" >"$KA_TTY"
+    j=$(tg_call "$tok" getUpdates -d timeout=10 2>/dev/null) || { sleep 3; continue; }
+    ids=$(jq -r '[.result[] | (.message // .my_chat_member // .channel_post // {}) | .chat? | select(.type? == "supergroup") | "\(.id)\t\(.title)"] | unique | .[]' <<<"$j" 2>/dev/null)
+    [[ -n $ids ]] && break
+    sleep 2
+  done
+  systemctl start "$KA_GATEWAY_UNIT" >>"$KA_LOG" 2>&1
+  [[ -n $ids ]] || { ui_msg "Tidak terdeteksi" "Tidak ada pesan grup yang masuk. Pastikan grup sudah supergroup dengan Topics, bot sudah di dalamnya, dan privacy mode bot dimatikan." 10; return 1; }
+  local items=() id title
+  while IFS=$'\t' read -r id title; do items+=("$id" "$title"); done <<<"$ids"
+  ui_menu "Pilih grup" "Grup yang terdeteksi:" "${items[@]}"
+}
+
+check_group() { # check_group CHAT_ID -> pesan status
+  local tok j me forum st topics
+  tok=$(admin_token)
+  j=$(tg_call "$tok" getChat --data-urlencode "chat_id=$1") || { printf 'Bot admin tidak bisa membaca grup %s (belum jadi anggota?).' "$1"; return 1; }
+  forum=$(jq -r '.result.is_forum // false' <<<"$j")
+  me=$(tg_call "$tok" getMe | jq -r '.result.id')
+  j=$(tg_call "$tok" getChatMember --data-urlencode "chat_id=$1" -d "user_id=$me")
+  st=$(jq -r '.result.status // "?"' <<<"$j")
+  topics=$(jq -r '.result.can_manage_topics // false' <<<"$j")
+  printf 'Grup %s\n  Topics aktif   : %s\n  Status bot     : %s\n  Kelola topik   : %s\n' "$1" \
+    "$([[ $forum == true ]] && echo ya || echo "TIDAK (aktifkan Topics)")" "$st" \
+    "$([[ $topics == true ]] && echo ya || echo "TIDAK (beri izin Manage Topics)")"
+  [[ $forum == true && $st == administrator && $topics == true ]]
+}
+
+create_topic() { # create_topic NAMA -> thread id (pakai bot admin)
+  local tok j
+  tok=$(admin_token); [[ -n $tok && -n $KA_TG_GROUP_ID ]] || return 1
+  j=$(tg_call "$tok" createForumTopic --data-urlencode "chat_id=$KA_TG_GROUP_ID" --data-urlencode "name=$1") || return 1
+  jq -er '.result.message_thread_id' <<<"$j"
+}
+
+apply_topics() { # apply_topics NAMA "id1,id2"
+  local envf users first=${2%%,*}
+  envf=$(profile_env "$1")
+  users=$(envget "$(profile_env default)" TELEGRAM_ALLOWED_USERS)
+  envset "$envf" TELEGRAM_HOME_CHANNEL "$KA_TG_GROUP_ID"
+  envset "$envf" TELEGRAM_HOME_CHANNEL_THREAD_ID "$first"
+  envset "$envf" TELEGRAM_ALLOWED_TOPICS "$2"
+  envset "$envf" TELEGRAM_REQUIRE_MENTION false
+  [[ -n $users ]] && envset "$envf" TELEGRAM_GROUP_ALLOWED_USERS "$users"
+  return 0
+}
+
+do_group_setup() {
+  local gid c msg
+  c=$(ui_menu "Grup forum kantor" "Semua bot karyawan bisa berkumpul di satu grup Telegram, tiap karyawan di topiknya sendiri.\nGrup saat ini: ${KA_TG_GROUP_ID:-belum diatur}" \
+       1 "Deteksi otomatis (kirim pesan di grup)" \
+       2 "Isi ID grup manual (-100...)" \
+       3 "Periksa izin bot admin di grup" \
+       4 "Lepas grup") || return 0
+  case $c in
+    1) gid=$(detect_group) || return 0 ;;
+    2) ui_input gid "ID grup" "ID supergroup (diawali -100). Cara cepat: buka grup di web.telegram.org, angka di URL setelah #-100..." "${KA_TG_GROUP_ID:--100}" valid_chat_id "Format: -100 diikuti angka." || return 0 ;;
+    3) [[ -n $KA_TG_GROUP_ID ]] || { ui_msg "Belum ada grup" "Atur grup dulu." 8; return 0; }
+       msg=$(check_group "$KA_TG_GROUP_ID"); ui_msg "Pemeriksaan grup" "$msg" 12; return 0 ;;
+    4) ui_yesno "Lepas grup" "Lepas grup kantor? Pengaturan topik tiap karyawan tetap tersimpan sampai diubah." no || return 0
+       KA_TG_GROUP_ID=""; conf_set KA_TG_GROUP_ID ""; return 0 ;;
+  esac
+  KA_TG_GROUP_ID=$gid; conf_set KA_TG_GROUP_ID "$gid"
+  envset "$(profile_env default)" TELEGRAM_GROUP_ALLOWED_USERS "$(envget "$(profile_env default)" TELEGRAM_ALLOWED_USERS)"
+  msg=$(check_group "$gid") && msg+="
+
+Siap. Berikutnya: Telegram -> Topik karyawan." || msg+="
+
+Perbaiki pengaturan grup di atas, lalu periksa lagi."
+  ui_msg "Grup kantor disimpan" "$msg" 15
+}
+
+do_topics() {
+  local name c th
+  [[ -n $KA_TG_GROUP_ID ]] || { ui_msg "Belum ada grup" "Atur grup forum kantor dulu (Telegram -> Grup forum kantor)." 8; return 0; }
+  name=$(pick_profile "Atur topik grup untuk:" default) || return 0
+  c=$(ui_menu "Topik $name" "Topik saat ini: $(envget "$(profile_env "$name")" TELEGRAM_ALLOWED_TOPICS)\n(kosong = menjawab di semua topik)" \
+       1 "Buat topik baru di grup" \
+       2 "Pakai topik yang sudah ada (isi ID topik)" \
+       3 "Jawab di semua topik (hapus batasan)") || return 0
+  case $c in
+    1) ui_input th "Nama topik" "Nama topik baru untuk $name:" "$(profile_desc "$name")" valid_nonempty || return 0
+       th=$(create_topic "$th") || { ui_msg "Gagal" "Topik gagal dibuat. Pastikan bot admin admin grup dengan izin Manage Topics (Telegram -> Grup -> Periksa izin)." 9; return 0; } ;;
+    2) ui_input th "ID topik" "ID topik (pisahkan koma bila lebih dari satu). General = 1.\nCara melihat: klik kanan pesan di topik -> Copy Message Link -> t.me/c/<grup>/<ID_TOPIK>/<pesan>" \
+         "" valid_thread_list "Hanya angka, dipisah koma." || return 0 ;;
+    3) envdel "$(profile_env "$name")" TELEGRAM_ALLOWED_TOPICS; gateway_restart >>"$KA_LOG" 2>&1
+       ui_msg "Selesai" "$name kini menjawab di semua topik." 8; return 0 ;;
+  esac
+  apply_topics "$name" "$th"
+  gateway_restart >>"$KA_LOG" 2>&1 || true
+  ui_msg "Topik diatur" "$name sekarang hanya menjawab di topik $th grup kantor, dan laporan jadwalnya dikirim ke sana.\n\nPastikan bot $name sudah dimasukkan ke grup (sebagai admin)." 11
+}
+
+do_pengawas_topic() {
+  local th
+  [[ -n $KA_TG_GROUP_ID ]] || { ui_msg "Belum ada grup" "Atur grup forum kantor dulu." 8; return 0; }
+  th=$(create_topic "🛡️ Pengawas") || { ui_msg "Gagal" "Topik gagal dibuat (cek izin bot admin)." 8; return 0; }
+  KA_PENGAWAS_THREAD=$th; conf_set KA_PENGAWAS_THREAD "$th"
+  "$KA_LIBDIR/pengawas.sh" uji >/dev/null 2>&1
+  ui_msg "Topik Pengawas" "Topik 'Pengawas' dibuat (ID $th). Notifikasi Pengawas dikirim ke sana. Pesan uji sudah dikirim." 9
+}
+
+do_admin_bot() {
+  local tok ids envf; envf=$(profile_env default)
+  BOT_USERNAME=""
+  ask_bot_token tok default || return 0
+  [[ -n $tok ]] && envset "$envf" TELEGRAM_BOT_TOKEN "$tok"
+  ui_input ids "User ID diizinkan" "User ID Telegram yang boleh memerintah bot (pisahkan koma):" \
+    "$(envget "$envf" TELEGRAM_ALLOWED_USERS)" valid_user_ids "Hanya angka, dipisah koma." || return 0
+  set_allowed_users "$ids"
+  gateway_restart >>"$KA_LOG" 2>&1 || true
+  ui_msg "Selesai" "Bot admin dan user yang diizinkan disimpan. Gateway di-restart." 8
+}
+
+set_allowed_users() { # terapkan ke admin + semua karyawan yang punya bot
+  local p envf
+  for p in default $(list_profiles); do
+    envf=$(profile_env "$p")
+    [[ $p == default || -n $(envget "$envf" TELEGRAM_BOT_TOKEN) ]] || continue
+    envset "$envf" TELEGRAM_ALLOWED_USERS "$1"
+    [[ -n $(envget "$envf" TELEGRAM_GROUP_ALLOWED_USERS) || -n $KA_TG_GROUP_ID ]] && envset "$envf" TELEGRAM_GROUP_ALLOWED_USERS "$1"
+    [[ -n $(envget "$envf" TELEGRAM_HOME_CHANNEL) ]] || envset "$envf" TELEGRAM_HOME_CHANNEL "${1%%,*}"
+  done
+}
+
+do_check_bots() {
+  local p tok u out=""
+  for p in default $(list_profiles); do
+    tok=$(envget "$(profile_env "$p")" TELEGRAM_BOT_TOKEN)
+    if [[ -z $tok ]]; then out+="$(printf '%-14s -' "$p")\n"; continue; fi
+    if u=$(tg_bot_username "$tok"); then out+="$(printf '%-14s @%s  OK' "$p" "$u")\n"
+    else out+="$(printf '%-14s TOKEN DITOLAK / tidak terjangkau' "$p")\n"; fi
+  done
+  ui_msg "Cek bot Telegram" "$out" 18
+}
+
+m_telegram() {
+  local c
+  while c=$(ui_menu "Telegram" "Bot, grup forum, dan topik kantor:" \
+        1 "Bot admin & user yang diizinkan" \
+        2 "Grup forum kantor" \
+        3 "Topik karyawan di grup" \
+        4 "Buat topik Pengawas" \
+        5 "Cek semua bot" \
+        6 "Kirim pesan uji (Pengawas)" \
+        7 "Panduan BotFather"); do
+    case $c in
+      1) do_admin_bot ;;
+      2) do_group_setup ;;
+      3) do_topics ;;
+      4) do_pengawas_topic ;;
+      5) do_check_bots ;;
+      6) ui_run "Pesan uji" "$KA_LIBDIR/pengawas.sh" uji ;;
+      7) ui_msg "Panduan BotFather" \
+"1. Buka @BotFather -> /newbot -> isi nama & username (harus berakhiran 'bot').
+2. Salin token (123456789:AAH...). Jangan kirim token ke chat mana pun.
+3. /mybots -> pilih bot -> Bot Settings -> Group Privacy -> Turn off
+   (agar bot bisa membaca pesan grup). Bila bot sudah di grup sebelum
+   privacy dimatikan: keluarkan lalu masukkan lagi.
+4. Grup forum: buat grup -> Edit -> Topics ON -> tambahkan semua bot
+   sebagai admin. Bot admin butuh izin 'Manage Topics'.
+5. User ID Anda: kirim pesan ke @userinfobot." 18 ;;
+    esac
+  done
+}
+
+# ---------------------------------------------------------------------------
+# Web, akses & branding
+# ---------------------------------------------------------------------------
+apply_web_now() {
+  ui_info "Menerapkan pengaturan web..."
+  ka_save_conf
+  ka_apply_web >>"$KA_LOG" 2>&1
+  "$KA_LIBDIR/pengawas.sh" periksa --diam >/dev/null 2>&1 || true
+}
+
+do_access_mode() {
+  local m
+  m=$(ui_menu "Mode akses" "Mode saat ini: $KA_ACCESS_MODE" \
+       local "Hanya dari server ini (SSH tunnel)" \
+       lan   "Dari jaringan kantor (LAN) dengan login") || return 0
+  if [[ $m == lan ]]; then
+    ui_input KA_WEB_USER "Login web" "Username login web:" "$KA_WEB_USER" valid_username || return 0
+    if [[ ! -s $KA_HTPASSWD ]] || ui_yesno "Password" "Ganti password web?" no; then
+      ui_pass KA_WEB_PASS "Password web" 10 || return 0
+      info_set "Login web (password)" "$KA_WEB_PASS"
+    fi
+    info_set "Login web (username)" "$KA_WEB_USER"
+  fi
+  KA_ACCESS_MODE=$m
+  apply_web_now
+  local t; t=$(mktemp); ka_urls_text >"$t"; ui_text "Alamat baru" "$t"; rm -f "$t"
+}
+
+do_web_password() {
+  [[ $KA_ACCESS_MODE == lan ]] || { ui_msg "Mode lokal" "Password web hanya dipakai di mode LAN." 8; return 0; }
+  ui_pass KA_WEB_PASS "Password web baru" 10 || return 0
+  info_set "Login web (password)" "$KA_WEB_PASS"
+  apply_web_now
+  ui_msg "Selesai" "Password web diganti untuk portal, Kantor 3D, dan Panel Hermes." 8
+}
+
+do_ports() {
+  ui_input KA_PORTAL_PORT "Port portal" "Port portal:" "$KA_PORTAL_PORT" valid_port || return 0
+  ui_input KA_RUANG_PORT "Port Kantor 3D" "Port Kantor 3D:" "$KA_RUANG_PORT" valid_port || return 0
+  ui_input KA_DASH_PORT "Port Panel Hermes" "Port Panel Hermes:" "$KA_DASH_PORT" valid_port || return 0
+  apply_web_now
+  ui_msg "Selesai" "$(ka_urls_text)" 14
+}
+
+do_logo() {
+  local f c
+  c=$(ui_menu "Logo kantor" "Logo klien tampil di portal dan Kantor 3D (logo GNC tetap ada sebagai penyedia)." \
+       1 "Pasang logo dari file di server" 2 "Hapus logo kantor") || return 0
+  if [[ $c == 2 ]]; then rm -f "$KA_ETC"/brand/logo.*; apply_web_now; ui_msg "Selesai" "Logo kantor dihapus." 8; return 0; fi
+  ui_input f "File logo" "Path file logo di server (svg/png/jpg/webp, maks 1 MB).\nUpload dulu, contoh dari laptop: scp logo.png root@$(local_ip):/root/" "/root/logo.png" valid_logo \
+    "File tidak ada, bukan svg/png/jpg/webp, atau lebih dari 1 MB." || return 0
+  rm -f "$KA_ETC"/brand/logo.*
+  install -m 644 "$f" "$KA_ETC/brand/logo.${f##*.}"
+  apply_web_now
+  ui_msg "Selesai" "Logo kantor dipasang." 8
+}
+
+do_components() {
+  local sel
+  sel=$(ui_checklist "Komponen" "Komponen aktif:" \
+        dashboard "Panel Hermes" "$([[ $KA_WITH_DASHBOARD == yes ]] && echo ON || echo OFF)" \
+        ruang "Kantor 3D" "$([[ $KA_WITH_RUANG == yes ]] && echo ON || echo OFF)" \
+        portal "Portal kantor" "$([[ $KA_WITH_PORTAL == yes ]] && echo ON || echo OFF)" \
+        pengawas "Pengawas" "$([[ $KA_WITH_PENGAWAS == yes ]] && echo ON || echo OFF)") || return 0
+  KA_WITH_DASHBOARD=no; KA_WITH_RUANG=no; KA_WITH_PORTAL=no; KA_WITH_PENGAWAS=no
+  [[ $sel == *dashboard* ]] && KA_WITH_DASHBOARD=yes
+  [[ $sel == *ruang* ]] && KA_WITH_RUANG=yes
+  [[ $sel == *portal* ]] && KA_WITH_PORTAL=yes
+  [[ $sel == *pengawas* ]] && KA_WITH_PENGAWAS=yes
+  if [[ $KA_WITH_PORTAL == yes || $KA_WITH_RUANG == yes ]] && ! command -v nginx >/dev/null 2>&1; then
+    ui_info "Memasang nginx..."; apt-get install -y --no-install-recommends nginx >>"$KA_LOG" 2>&1
+  fi
+  [[ $KA_WITH_DASHBOARD == yes ]] && ka_install_branding
+  if [[ $KA_WITH_RUANG == yes && ! -x $KA_RUANG_CMD ]]; then ui_info "Memasang Kantor 3D..."; ka_install_ruang >>"$KA_LOG" 2>&1 || KA_WITH_RUANG=no; fi
+  if [[ $KA_WITH_PENGAWAS == yes ]]; then
+    ka_write_pengawas_units; systemctl daemon-reload
+    systemctl enable --now "$KA_PENGAWAS_UNIT.timer" "$KA_PENGAWAS_UNIT-harian.timer" >>"$KA_LOG" 2>&1
+  else
+    systemctl disable --now "$KA_PENGAWAS_UNIT.timer" "$KA_PENGAWAS_UNIT-harian.timer" >>"$KA_LOG" 2>&1 || true
+  fi
+  apply_web_now
+  do_status
+}
+
+do_public_urls() {
+  ui_msg "URL publik" "Isi bila portal/panel/Kantor 3D dibuka lewat domain (mis. Cloudflare Tunnel).\nKosongkan untuk memakai alamat IP:port." 9
+  ui_input KA_URL_PORTAL "URL portal" "Contoh: https://kantor.perusahaan.com" "$KA_URL_PORTAL" || return 0
+  ui_input KA_URL_DASHBOARD "URL Panel Hermes" "Contoh: https://panel.perusahaan.com" "$KA_URL_DASHBOARD" || return 0
+  ui_input KA_URL_RUANG "URL Kantor 3D" "Contoh: https://3d.perusahaan.com" "$KA_URL_RUANG" || return 0
+  # Panel Hermes lewat domain selalu butuh login (gerbang auth Hermes aktif saat public_url diisi)
+  if [[ -n $KA_URL_DASHBOARD && -z $(envget "$(profile_env default)" HERMES_DASHBOARD_BASIC_AUTH_PASSWORD) ]]; then
+    ui_input KA_WEB_USER "Login Panel Hermes" "Panel Hermes lewat domain wajib login. Username:" "$KA_WEB_USER" valid_username || return 0
+    ui_pass KA_WEB_PASS "Password Panel Hermes" 10 || return 0
+    info_set "Login web (username)" "$KA_WEB_USER"; info_set "Login web (password)" "$KA_WEB_PASS"
+  fi
+  apply_web_now
+}
+
+do_cloudflare() {
+  local tok
+  ui_msg "Cloudflare Tunnel" \
+"Akses dari internet memakai akun Cloudflare milik kantor:
+  1. Cloudflare Zero Trust -> Networks -> Tunnels -> Create (cloudflared).
+  2. Salin token di bagian 'Install connector'.
+  3. Setelah terpasang, tambah Public Hostname:
+       portal  -> http://localhost:$KA_PORTAL_PORT
+       3D      -> http://localhost:$KA_RUANG_PORT
+  4. WAJIB lindungi dengan Cloudflare Access (Zero Trust -> Access ->
+     Applications) agar hanya email kantor yang bisa masuk.
+  Panel Hermes sebaiknya TIDAK dibuka ke internet; pakai mode LAN/VPN." 20
+  ui_secret tok "Token tunnel" "Tempel token Cloudflare Tunnel (kosong = batal):" || return 0
+  [[ -n $tok ]] || return 0
+  valid_cf_token "$tok" || { ui_msg "Token tidak valid" "Token tunnel terlalu pendek / berisi karakter aneh." 8; return 0; }
+  KA_CF_TOKEN=$tok
+  ui_info "Memasang Cloudflare Tunnel..."
+  if ka_install_cloudflared >>"$KA_LOG" 2>&1; then KA_WITH_CLOUDFLARED=yes; ka_save_conf; ui_msg "Selesai" "Cloudflare Tunnel aktif." 8
+  else ui_msg "Gagal" "Pemasangan gagal. Lihat: kantorai logs installer" 8; fi
+}
+
+m_web() {
+  local c
+  while c=$(ui_menu "Web, akses & branding" "Pengaturan portal, Panel Hermes, dan Kantor 3D:" \
+        1 "Mode akses (lokal / LAN)" \
+        2 "Ganti password web" \
+        3 "Ganti port" \
+        4 "Nama kantor" \
+        5 "Logo kantor" \
+        6 "Komponen aktif" \
+        7 "URL publik (domain)" \
+        8 "Cloudflare Tunnel" \
+        9 "Tampilkan alamat"); do
+    case $c in
+      1) do_access_mode ;;
+      2) do_web_password ;;
+      3) do_ports ;;
+      4) ui_input KA_OFFICE_NAME "Nama kantor" "Nama kantor:" "$KA_OFFICE_NAME" valid_office && apply_web_now ;;
+      5) do_logo ;;
+      6) do_components ;;
+      7) do_public_urls ;;
+      8) do_cloudflare ;;
+      9) local t; t=$(mktemp); ka_urls_text >"$t"; ui_text "Alamat" "$t"; rm -f "$t" ;;
+    esac
+  done
+}
+
+# ---------------------------------------------------------------------------
+# Log
+# ---------------------------------------------------------------------------
+log_file_for() {
+  case $1 in
+    gateway) printf '%s/logs/gateway.log' "$HERMES_HOME" ;;
+    errors) printf '%s/logs/errors.log' "$HERMES_HOME" ;;
+    agent|admin|default) printf '%s/logs/agent.log' "$HERMES_HOME" ;;
+    installer) printf '%s' "$KA_LOG" ;;
+    *) if profile_exists "$1"; then printf '%s/logs/agent.log' "$(profile_home "$1")"; else return 1; fi ;;
+  esac
+}
+show_log() { # show_log TARGET [follow]
+  local t=$1 f tmp
+  case $t in
+    panel|dashboard) tmp=$(mktemp); journalctl -u "$KA_DASH_UNIT" -n 300 --no-pager 2>&1 | redact_stream >"$tmp" ;;
+    kantor3d|ruang) tmp=$(mktemp); journalctl -u "$KA_RUANG_UNIT" -n 300 --no-pager 2>&1 | redact_stream >"$tmp" ;;
+    pengawas) tmp=$(mktemp); grep -a 'pengawas' "$KA_LOG" 2>/dev/null | tail -300 >"$tmp" ;;
+    *) f=$(log_file_for "$t") || { errp "Log tidak dikenal: $t"; return 1; }
+       [[ -f $f ]] || { ui_msg "Belum ada log" "File $f belum ada." 8; return 0; }
+       if [[ ${2:-} == follow ]]; then
+         run_tty bash -c "printf 'Ctrl+C untuk berhenti\n\n'; tail -n 50 -F '$f' | sed -E 's#bot[0-9]+:[A-Za-z0-9_-]+#bot***#g'"
+         return 0
+       fi
+       tmp=$(mktemp); tail -n 300 "$f" | redact_stream >"$tmp" ;;
+  esac
+  [[ -s $tmp ]] || echo "(kosong)" >"$tmp"
+  ui_text "Log: $t" "$tmp"; rm -f "$tmp"
+}
+m_logs() {
+  local c n
+  while c=$(ui_menu "Log" "Lihat log (token & kunci disensor otomatis):" \
+        1 "Gateway Hermes" 2 "Error Hermes" 3 "Admin (agent)" 4 "Karyawan tertentu" \
+        5 "Panel Hermes" 6 "Kantor 3D" 7 "Pengawas" 8 "Installer / kantorai" \
+        9 "Ikuti log gateway langsung"); do
+    case $c in
+      1) show_log gateway ;; 2) show_log errors ;; 3) show_log agent ;;
+      4) n=$(pick_profile "Log karyawan:") && show_log "$n" ;;
+      5) show_log panel ;; 6) show_log kantor3d ;; 7) show_log pengawas ;; 8) show_log installer ;;
+      9) show_log gateway follow ;;
+    esac
+  done
+}
+
+# ---------------------------------------------------------------------------
+# Backup & restore
+# ---------------------------------------------------------------------------
+do_backup_now() {
+  local out
+  ui_info "Membuat backup (konfigurasi, memori, sesi, skill semua karyawan)..."
+  if out=$("$KA_LIBDIR/pengawas.sh" backup); then ui_msg "Backup selesai" "File: $out\nUkuran: $(du -h "$out" | cut -f1)\n\nSalin ke luar server, contoh dari laptop:\n  scp root@$(local_ip):$out ." 12
+  else ui_msg "Backup gagal" "Lihat: kantorai logs installer" 8; return 1; fi
+}
+do_restore() {
+  local f=${1:-} items=() x etc
+  if [[ -z $f ]]; then
+    while IFS= read -r x; do items+=("$x" "$(du -h "$x" | cut -f1) · $(date -r "$x" '+%F %H:%M')"); done \
+      < <(ls -1t "$KA_BACKUP_DIR"/hermes-backup-*.zip 2>/dev/null)
+    ((${#items[@]})) || { ui_msg "Tidak ada backup" "Belum ada file di $KA_BACKUP_DIR." 8; return 0; }
+    f=$(ui_menu "Pulihkan backup" "Pilih backup (data Hermes sekarang akan ditimpa):" "${items[@]}") || return 0
+  fi
+  [[ -f $f ]] || { errp "File tidak ada: $f"; return 1; }
+  ui_yesno "Pulihkan" "Pulihkan dari:\n$f\n\nKonfigurasi, memori, sesi, dan skill akan DITIMPA isi backup. Gateway dihentikan selama proses.\nLanjutkan?" no || return 0
+  ui_info "Memulihkan..."
+  hm gateway stop --system -y >>"$KA_LOG" 2>&1 || systemctl stop "$KA_GATEWAY_UNIT"
+  if hm import "$f" -f >>"$KA_LOG" 2>&1; then
+    etc="${f%.zip}-kantorai-etc.tgz"
+    [[ -f $etc ]] && ui_yesno "Pengaturan kantorai" "Pulihkan juga pengaturan kantorai (port, mode akses, password web)?" no \
+      && tar -xzf "$etc" -C / && ka_load_conf && ka_apply_web >>"$KA_LOG" 2>&1
+    ka_install_branding
+    systemctl start "$KA_GATEWAY_UNIT"
+    ui_msg "Selesai" "Backup dipulihkan dan gateway dijalankan." 8
+  else
+    systemctl start "$KA_GATEWAY_UNIT"
+    ui_msg "Gagal" "Pemulihan gagal. Lihat: kantorai logs installer" 8; return 1
+  fi
+}
+m_backup() {
+  local c
+  while c=$(ui_menu "Backup & restore" "Backup otomatis: $KA_AUTO_BACKUP (tiap 07:05, simpan $KA_BACKUP_KEEP terakhir) · lokasi $KA_BACKUP_DIR" \
+        1 "Backup sekarang" 2 "Daftar backup" 3 "Pulihkan dari backup" \
+        4 "Backup otomatis on/off" 5 "Jumlah backup yang disimpan"); do
+    case $c in
+      1) do_backup_now ;;
+      2) local t; t=$(mktemp); ls -lh "$KA_BACKUP_DIR" >"$t" 2>&1; ui_text "Daftar backup" "$t"; rm -f "$t" ;;
+      3) do_restore ;;
+      4) if [[ $KA_AUTO_BACKUP == yes ]]; then KA_AUTO_BACKUP=no; else KA_AUTO_BACKUP=yes; fi
+         conf_set KA_AUTO_BACKUP "$KA_AUTO_BACKUP"; ui_msg "Backup otomatis" "Backup otomatis: $KA_AUTO_BACKUP" 8 ;;
+      5) ui_input KA_BACKUP_KEEP "Simpan backup" "Jumlah backup harian yang disimpan:" "$KA_BACKUP_KEEP" valid_thread_id && conf_set KA_BACKUP_KEEP "$KA_BACKUP_KEEP" ;;
+    esac
+  done
+}
+
+# ---------------------------------------------------------------------------
+# Pengawas
+# ---------------------------------------------------------------------------
+m_pengawas() {
+  local c
+  while c=$(ui_menu "Pengawas" "Pengawas mengecek layanan tiap 2 menit, memulihkan yang mati, dan melapor ke Telegram." \
+        1 "Status terakhir" 2 "Jalankan pemeriksaan sekarang" 3 "Kirim pesan uji" 4 "Kirim laporan harian sekarang"); do
+    case $c in
+      1) local t; t=$(mktemp); jq . "$KA_WWW/status.json" >"$t" 2>&1 || echo "(belum ada status)" >"$t"; ui_text "Status Pengawas" "$t"; rm -f "$t" ;;
+      2) ui_run "Pemeriksaan" "$KA_LIBDIR/pengawas.sh" periksa ;;
+      3) ui_run "Pesan uji" "$KA_LIBDIR/pengawas.sh" uji ;;
+      4) ui_run "Laporan harian" "$KA_LIBDIR/pengawas.sh" harian ;;
+    esac
+  done
+}
+
+# ---------------------------------------------------------------------------
+# Update
+# ---------------------------------------------------------------------------
+update_hermes() {
+  run_tty bash -c "HOME=$KA_ROOT_HOME '$HERMES_BIN' update"
+  gateway_restart >>"$KA_LOG" 2>&1 || true
+  [[ $KA_WITH_DASHBOARD == yes ]] && { ka_install_branding; systemctl restart "$KA_DASH_UNIT"; }
+  return 0
+}
+update_ruang() {
+  ui_info "Memperbarui Kantor 3D..."
+  rm -f "$KA_VAR/ruang-install.sh"
+  curl -fsSL --retry 3 "$KA_RUANG_INSTALL_URL" -o "$KA_VAR/ruang-install.sh" \
+    && env -u RUANG_BIN -u RUANG_HOME HOME=$KA_ROOT_HOME bash "$KA_VAR/ruang-install.sh" >>"$KA_LOG" 2>&1 \
+    && systemctl restart "$KA_RUANG_UNIT"
+}
+update_self() {
+  local tmp src
+  tmp=$(mktemp -d /tmp/kantorai-up.XXXXXX)
+  ui_info "Mengunduh versi terbaru kantorai ($KA_REPO@$KA_BRANCH)..."
+  curl -fsSL --retry 3 "https://codeload.github.com/$KA_REPO/tar.gz/refs/heads/$KA_BRANCH" -o "$tmp/src.tgz" \
+    && tar -xzf "$tmp/src.tgz" -C "$tmp" || { errp "Gagal mengunduh pembaruan"; return 1; }
+  src=$(find "$tmp" -mindepth 1 -maxdepth 1 -type d | head -1)
+  [[ -f $src/install-kantorai.sh ]] || { errp "Paket pembaruan tidak lengkap"; return 1; }
+  ((TUI)) && clear
+  bash "$src/install-kantorai.sh" --repair --source "$src"
+  local rc=$?
+  ((TUI)) && { printf '\nTekan Enter untuk kembali...'; read -r _; }
+  rm -rf "$tmp"
+  ((rc == 0)) && exec "$KA_BINDIR/kantorai"
+  return $rc
+}
+m_update() {
+  local c
+  while c=$(ui_menu "Update" "Versi kantorai $KA_VERSION · Hermes: $(hm --version 2>/dev/null | head -1)" \
+        1 "Update Hermes Agent" 2 "Update Kantor 3D" 3 "Update menu kantorai (dari GitHub)"); do
+    case $c in
+      1) update_hermes ;;
+      2) update_ruang && ui_msg "Selesai" "Kantor 3D diperbarui." 8 || ui_msg "Gagal" "Lihat: kantorai logs installer" 8 ;;
+      3) update_self ;;
+    esac
+  done
+}
+
+# ---------------------------------------------------------------------------
+# Diagnosa & info
+# ---------------------------------------------------------------------------
+diag_text() {
+  printf '== Port yang dipakai layanan kantor ==\n'
+  ss -Hltnp 2>/dev/null | awk '{print $4, $6}' | grep -E ":($KA_PORTAL_PORT|$KA_RUANG_PORT|$KA_RUANG_INTERNAL_PORT|$KA_DASH_PORT) " || echo "(tidak ada)"
+  printf '\n== hermes gateway status ==\n'; hm gateway status --system 2>&1 | tail -25
+  printf '\n== hermes doctor ==\n'; timeout 120 hm doctor 2>&1 | tail -60
+  printf '\n== nginx -t ==\n'; nginx -t 2>&1
+}
+do_info() {
+  local t; t=$(mktemp)
+  { ka_urls_text; printf '\n'; cat "$KA_INFO" 2>/dev/null; printf '\nFolder program : %s\nPengaturan     : %s\nBackup         : %s\n' "$KA_HOME" "$KA_CONF" "$KA_BACKUP_DIR"; } >"$t"
+  if ((TUI)); then ui_text "Info instalasi" "$t"; else cat "$t"; fi
+  rm -f "$t"
+}
+
+do_uninstall() {
+  local a
+  printf '%sMenghapus GNC Kantor AI dari server ini.%s\n' "$C_YLW" "$C_RST"
+  printf 'Yang dihapus: menu kantorai, Panel/Kantor 3D/Pengawas service, konfigurasi nginx, portal.\n'
+  printf 'Data Hermes (%s) dan backup (%s) TIDAK dihapus kecuali dipilih di bawah.\n\n' "$HERMES_HOME" "$KA_BACKUP_DIR"
+  read -r -p "Ketik HAPUS untuk melanjutkan: " a; [[ $a == HAPUS ]] || { echo "Batal."; return 0; }
+  systemctl disable --now "$KA_DASH_UNIT" "$KA_RUANG_UNIT" "$KA_PENGAWAS_UNIT.timer" "$KA_PENGAWAS_UNIT-harian.timer" >/dev/null 2>&1 || true
+  rm -f "$KA_SYSTEMD_DIR/$KA_DASH_UNIT.service" "$KA_SYSTEMD_DIR/$KA_RUANG_UNIT.service" \
+        "$KA_SYSTEMD_DIR/$KA_PENGAWAS_UNIT".{service,timer} "$KA_SYSTEMD_DIR/$KA_PENGAWAS_UNIT-harian".{service,timer}
+  rm -f "$KA_NGINX_CONF"; ka_nginx_reload || true
+  rm -rf "$KA_WWW" "$HERMES_HOME/plugins/$KA_PLUGIN_NAME" "$HERMES_HOME/dashboard-themes/gnc.yaml"
+  read -r -p "Hapus juga Kantor 3D (Ruang)? [y/N] " a
+  if [[ $a =~ ^[Yy] ]]; then curl -fsSL "$KA_RUANG_INSTALL_URL" | env -u RUANG_BIN -u RUANG_HOME HOME=$KA_ROOT_HOME bash -s -- --uninstall || true; fi
+  read -r -p "Hapus juga Hermes Agent BESERTA semua karyawan & datanya? [y/N] " a
+  if [[ $a =~ ^[Yy] ]]; then
+    hm gateway uninstall --system >/dev/null 2>&1 || true
+    hm uninstall || true
+  fi
+  systemctl daemon-reload
+  rm -rf "$KA_HOME" "$KA_LIBDIR" "$KA_ETC" "$KA_PROFILE_D/kantorai.sh" "$KA_BINDIR/kantorai"
+  echo "GNC Kantor AI dihapus. Backup tetap ada di $KA_BACKUP_DIR."
+}
+
+# ---------------------------------------------------------------------------
+# Menu utama & CLI
+# ---------------------------------------------------------------------------
+main_menu() {
+  ensure_tui
+  local c
+  while true; do
+    c=$(ui_menu "GNC Kantor AI · $KA_OFFICE_NAME" "Karyawan: $(( $(list_profiles | wc -l) )) · Gateway: $(fmt_state "$(svc_state "$KA_GATEWAY_UNIT")") · Akses: $KA_ACCESS_MODE" \
+        1  "Status kantor" \
+        2  "Karyawan AI (tambah, ubah, hapus)" \
+        3  "Layanan (restart, start, stop)" \
+        4  "Model AI admin" \
+        5  "Telegram (bot, grup, topik)" \
+        6  "Web, akses & branding" \
+        7  "Log" \
+        8  "Backup & restore" \
+        9  "Pengawas" \
+        10 "Update" \
+        11 "Diagnosa" \
+        12 "Info instalasi" \
+        0  "Keluar") || break
+    case $c in
+      1) do_status ;; 2) m_karyawan ;; 3) m_layanan ;;
+      4) run_tty hm model && gateway_restart >>"$KA_LOG" 2>&1 ;;
+      5) m_telegram ;; 6) m_web ;; 7) m_logs ;; 8) m_backup ;; 9) m_pengawas ;; 10) m_update ;;
+      11) ui_run "Diagnosa" diag_text ;; 12) do_info ;; 0) break ;;
+    esac
+  done
+  clear
+}
+
+usage() { sed -n '9,26p' "$0" | sed 's/^#  \{0,1\}//'; }
+
+cli() {
+  local cmd=${1:-}; shift || true
+  case $cmd in
+    "") main_menu ;;
+    status) do_status ;;
+    restart) restart_target "${1:-semua}" ;;
+    karyawan)
+      case ${1:-daftar} in
+        daftar|list) printf '  %-14s %-7s %-22s %s\n' NAMA BOT MODEL JABATAN; crew_lines ;;
+        tambah|add) ensure_tui; do_add_employee; clear ;;
+        hapus|del) ensure_tui; do_delete_employee "${2:-}"; clear ;;
+        *) die "kantorai karyawan [daftar|tambah|hapus NAMA]" ;;
+      esac ;;
+    model) local n=${1:-default}; profile_exists "$n" || die "Karyawan '$n' tidak ada"; hm -p "$n" model && gateway_restart ;;
+    logs|log) show_log "${1:-gateway}" "${2:-}" ;;
+    backup) "$KA_LIBDIR/pengawas.sh" backup ;;
+    restore) [[ -n ${1:-} ]] || die "kantorai restore FILE.zip"; do_restore "$1" ;;
+    pengawas) "$KA_LIBDIR/pengawas.sh" "${1:-status}" ;;
+    web)
+      case ${1:-} in
+        lokal|local) KA_ACCESS_MODE=local; apply_web_now; ka_urls_text ;;
+        lan) [[ -s $KA_HTPASSWD ]] || die "Password web belum ada. Jalankan: kantorai web password"; KA_ACCESS_MODE=lan; apply_web_now; ka_urls_text ;;
+        password) ensure_tui; KA_ACCESS_MODE=lan; ui_pass KA_WEB_PASS "Password web" 10 && { info_set "Login web (password)" "$KA_WEB_PASS"; apply_web_now; }; clear; ka_urls_text ;;
+        *) ka_urls_text ;;
+      esac ;;
+    update)
+      case ${1:-} in
+        hermes) update_hermes ;; kantor3d|ruang) update_ruang ;; self|kantorai) update_self ;;
+        *) die "kantorai update [hermes|kantor3d|self]" ;;
+      esac ;;
+    doctor|diagnosa) diag_text ;;
+    info) do_info ;;
+    uninstall) do_uninstall ;;
+    version|-v|--version) echo "GNC Kantor AI $KA_VERSION" ;;
+    help|-h|--help) usage ;;
+    *) errp "Perintah tidak dikenal: $cmd"; usage; exit 2 ;;
+  esac
+}
+
+need_root
+ka_load_conf
+cli "$@"

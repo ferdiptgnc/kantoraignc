@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# curl tiruan: unduhan installer & Telegram Bot API. Argumen dicatat (token lewat -K stdin, jadi tidak tercatat).
+echo "curl $*" >>"$MOCK_LOG"
+url=""; out=""; data=(); usecfg=0
+while (($#)); do
+  case $1 in
+    -K) usecfg=1; shift ;;
+    -o) out=$2; shift ;;
+    -d|--data-urlencode) data+=("$2"); shift ;;
+    -m|--retry|--proto) shift ;;
+    http*) url=$1 ;;
+  esac
+  shift
+done
+if ((usecfg)); then url=$(sed -n 's/^url = "\(.*\)"$/\1/p'); fi
+case $url in
+  *hermes*install.sh) printf '#!/bin/sh\nmkdir -p "$HOME/.local/bin"; cp "%s/hermes" "$HOME/.local/bin/hermes"; chmod +x "$HOME/.local/bin/hermes"\n' "$MOCKS" >"$out"; exit 0 ;;
+  *ruang*install.sh) printf '#!/bin/sh\nmkdir -p "$HOME/.local/bin"; printf "#!/bin/sh\\necho ruang tiruan\\n" >"$HOME/.local/bin/ruang"; chmod +x "$HOME/.local/bin/ruang"\n' >"$out"; exit 0 ;;
+  */bot*) tok=${url#*/bot}; tok=${tok%%/*}; m=${url##*/}
+          [[ $tok == *BAD* ]] && exit 22
+          case $m in
+            getMe) echo '{"ok":true,"result":{"id":111,"username":"uji_'"${tok:0:4}"'_bot"}}' ;;
+            sendMessage) for d in "${data[@]}"; do [[ $d == text=* ]] && printf '%s\n---\n' "${d#text=}" >>"$MOCK_STATE/tg.log"; [[ $d == message_thread_id=* ]] && echo "thread:${d#*=}" >>"$MOCK_STATE/tg.log"; done; echo '{"ok":true}' ;;
+            createForumTopic) echo '{"ok":true,"result":{"message_thread_id":77}}' ;;
+            getChat) echo '{"ok":true,"result":{"id":-1001234567890,"is_forum":true}}' ;;
+            getChatMember) echo '{"ok":true,"result":{"status":"administrator","can_manage_topics":true}}' ;;
+            getUpdates) echo '{"ok":true,"result":[{"message":{"chat":{"id":-1001234567890,"title":"Grup Uji","type":"supergroup"}}}]}' ;;
+            *) echo '{"ok":true}' ;;
+          esac; exit 0 ;;
+esac
+echo "url tiruan tidak dikenal: $url" >&2; exit 6
