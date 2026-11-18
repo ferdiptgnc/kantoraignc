@@ -101,7 +101,7 @@ check "status: menampilkan gateway aktif" grep -q "Gateway Hermes.*aktif" "$T/st
 check "status: menampilkan nama kantor" has "$T/status.out" "PT Uji Coba Sejahtera"
 ka karyawan daftar >"$T/daftar.out" 2>&1
 check "daftar karyawan memuat admin" grep -q "^  default .*bot ✓" "$T/daftar.out"
-ka version | grep -q "GNC Kantor AI 1.1.0"; check "kantorai version" test $? -eq 0
+ka version | grep -q "GNC Kantor AI 1.2.0"; check "kantorai version" test $? -eq 0
 ka perintah-ngawur >/dev/null 2>&1; check "perintah tidak dikenal ditolak (kode 2)" test $? -eq 2
 
 section "3. Tambah karyawan (menu teks, KA_PLAIN=1)"
@@ -245,6 +245,56 @@ check "installer berhenti dengan kode gagal" grep -q "rc=1" "$T2/out"
 check "pesan menyebut tahap yang gagal" grep -q "Instalasi Hermes gagal di: Tahap 2/3 · Memasang dependensi Python" "$T2/out"
 check "tahap setelah gagal tidak dijalankan" bash -c "! grep -q 'tahap complete mulai' '$T2/kantorai.log'"
 rm -rf "$T2"
+
+section "12. Mode adopsi di server yang sudah berjalan (simulasi CT 104)"
+T3=$(mktemp -d /tmp/kantorai-uji3.XXXXXX)
+(
+  export KA_ROOT_HOME=$T3/root HERMES_HOME=$T3/root/.hermes HERMES_BIN=$T3/root/.local/bin/hermes KA_RUANG_CMD=$T3/root/.local/bin/ruang
+  export KA_HOME=$T3/opt KA_ETC=$T3/etc KA_CONF=$T3/etc/kantorai.conf KA_INFO=$T3/etc/INFO KA_HTPASSWD=$T3/etc/ht KA_VAR=$T3/var KA_WWW=$T3/www
+  export KA_BACKUP_DIR=$T3/bak KA_LOG=$T3/kantorai.log KA_LIBDIR=$T3/lib KA_BINDIR=$T3/bin KA_SYSTEMD_DIR=$T3/systemd KA_NGINX_CONF=$T3/nginx.conf KA_PROFILE_D=$T3/pd
+  export MOCK_STATE=$T3/state MOCK_LOG=$T3/state/mock.log
+  mkdir -p "$MOCK_STATE" "$KA_ROOT_HOME/.local/bin" "$KA_PROFILE_D" "$HERMES_HOME" "$KA_SYSTEMD_DIR"
+  for m in "$MOCKS"/*; do cp "$m" "$KA_ROOT_HOME/.local/bin/"; done
+  export PATH="$KA_ROOT_HOME/.local/bin:$PATH"
+  # sistem yang sudah berjalan: gateway aktif, 2 karyawan, token bot, Kantor 3D GNC di port 3001, panel Hermes berjalan
+  printf 'TELEGRAM_BOT_TOKEN=%s\nTELEGRAM_ALLOWED_USERS=999\n' "$ADMIN_TOKEN" >"$HERMES_HOME/.env"; chmod 600 "$HERMES_HOME/.env"
+  hermes profile create researcher --description "Researcher" >/dev/null; hermes profile create sekretaris --description "Sekretaris" >/dev/null
+  echo "SOUL ASLI GNC" >"$HERMES_HOME/profiles/sekretaris/SOUL.md"; echo "TELEGRAM_BOT_TOKEN=$EMP_TOKEN" >>"$HERMES_HOME/profiles/sekretaris/.env"
+  echo "[Service]" >"$KA_SYSTEMD_DIR/hermes-gateway.service"; systemctl start hermes-gateway
+  : >"$MOCK_LOG"
+  sha() { find "$HERMES_HOME" \( -name .env -o -name SOUL.md -o -name profile.yaml \) -type f -print0 | sort -z | xargs -0 sha256sum; }
+  sha >"$T3/before.sha"
+  python3 -m http.server 3001 --bind 127.0.0.1 >/dev/null 2>&1 & HTTP=$!
+  bash -c 'exec -a "hermes dashboard --port 9119 --no-open" sleep 120' & DASH=$!
+  sleep 1
+  bash "$REPO/install-kantorai.sh" --adopt --check --source "$REPO" >"$T3/check.out" 2>&1; echo "rc=$?" >>"$T3/check.out"
+  test -e "$KA_CONF" && echo "CONF-ADA" >>"$T3/check.out"
+  bash "$REPO/install-kantorai.sh" --adopt --yes --source "$REPO" >"$T3/adopt.out" 2>&1; echo "rc=$?" >>"$T3/adopt.out"
+  sha >"$T3/after.sha"
+  echo failed >"$MOCK_STATE/units/hermes-gateway.service"
+  "$KA_LIBDIR/pengawas.sh" periksa; systemctl is-active hermes-gateway >"$T3/gw-after-pengawas" 2>/dev/null
+  kill "$HTTP" "$DASH" 2>/dev/null
+)
+check "--check: menampilkan rencana & keluar 0" bash -c "grep -q 'RENCANA PERUBAHAN' '$T3/check.out' && grep -q 'rc=0' '$T3/check.out'"
+check "--check: tidak membuat pengaturan apa pun" bash -c "! grep -q CONF-ADA '$T3/check.out'"
+check "rencana: gateway tidak di-restart" grep -q "Gateway Hermes (active.*tidak di-restart" "$T3/check.out"
+check "rencana: karyawan lama terdeteksi" grep -q "Karyawan: default, researcher, sekretaris" "$T3/check.out"
+check "rencana: Kantor 3D lama di port 3001 dipertahankan" grep -q "Kantor 3D yang sudah ada di port 3001 (python3" "$T3/check.out"
+check "rencana: panel Hermes yang berjalan dipertahankan" grep -q "Panel Hermes yang sudah berjalan" "$T3/check.out"
+check "adopsi selesai dengan kode 0" grep -q "rc=0" "$T3/adopt.out"
+check "gateway TIDAK di-restart/dipasang ulang" bash -c "! grep -qE 'gateway (restart|install)|systemctl restart hermes-gateway' '$T3/state/mock.log'"
+check "zona waktu tidak diubah" bash -c "! grep -q timedatectl '$T3/state/mock.log'"
+check ".env, SOUL.md, profile.yaml semua karyawan tidak berubah" cmp -s "$T3/before.sha" "$T3/after.sha"
+check "Kantor 3D ditandai external" grep -q "KA_WITH_RUANG='external'" "$T3/etc/kantorai.conf"
+check "Panel Hermes ditandai external (tanpa unit baru)" bash -c "grep -q \"KA_WITH_DASHBOARD='external'\" '$T3/etc/kantorai.conf' && test ! -f '$T3/systemd/kantorai-dashboard.service'"
+check "tidak ada unit/proxy Kantor 3D baru" bash -c "test ! -f '$T3/systemd/kantorai-ruang.service' && ! grep -q ':3001' '$T3/nginx.conf'"
+check "portal menautkan Kantor 3D lama" bash -c "jq -e '.ruang.enabled == true and .ruang.port == 3001' '$T3/www/portal/portal-config.json'"
+check "tema & plugin GNC tetap dipasang" test -f "$T3/root/.hermes/plugins/gnc-kantor/dashboard/manifest.json"
+check "Pengawas mode status, timer harian tidak aktif" bash -c "grep -q \"KA_PENGAWAS_MODE='status'\" '$T3/etc/kantorai.conf' && ! grep -q 'enable --now kantorai-pengawas-harian' '$T3/state/mock.log'"
+check "Pengawas mode status tidak me-restart gateway" test "$(cat "$T3/gw-after-pengawas")" = failed
+check "Pengawas mode status tetap menulis status.json" bash -c "jq -e '.crew | length == 3' '$T3/www/status.json'"
+cp "$T3/check.out" /tmp/contoh-rencana-adopsi.txt 2>/dev/null
+rm -rf "$T3"
 
 # ---------------------------------------------------------------------------
 printf '\n\e[1m%d lulus, %d gagal\e[0m\n' "$PASS" "$FAIL"

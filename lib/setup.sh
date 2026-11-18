@@ -24,6 +24,7 @@ ka_defaults() {
   : "${KA_WITH_RUANG:=yes}"
   : "${KA_WITH_PORTAL:=yes}"
   : "${KA_WITH_PENGAWAS:=yes}"
+  : "${KA_PENGAWAS_MODE:=penuh}"        # penuh (pulihkan + notifikasi + backup) | status (hanya tulis status.json)
   : "${KA_WITH_BROWSER:=no}"            # Chromium untuk tool browser agen (besar)
   : "${KA_WITH_CLOUDFLARED:=no}"
   : "${KA_CF_TOKEN:=}"
@@ -48,7 +49,7 @@ ka_save_conf() {
   local k
   for k in KA_OFFICE_NAME KA_BRAND_NAME KA_TZ KA_ACCESS_MODE KA_PORTAL_PORT KA_RUANG_PORT \
            KA_RUANG_INTERNAL_PORT KA_DASH_PORT KA_WEB_USER KA_WITH_DASHBOARD KA_WITH_RUANG \
-           KA_WITH_PORTAL KA_WITH_PENGAWAS KA_WITH_CLOUDFLARED KA_URL_DASHBOARD KA_URL_RUANG \
+           KA_WITH_PORTAL KA_WITH_PENGAWAS KA_PENGAWAS_MODE KA_WITH_CLOUDFLARED KA_URL_DASHBOARD KA_URL_RUANG \
            KA_URL_PORTAL KA_TG_GROUP_ID KA_PENGAWAS_THREAD KA_AUTO_BACKUP KA_BACKUP_KEEP; do
     conf_set "$k" "${!k-}"
   done
@@ -63,6 +64,10 @@ ka_load_conf() {
   fi
   ka_defaults
 }
+
+# yes = dipasang & dikelola kantorai; external = sudah ada di server, dikelola terpisah
+# (kantorai hanya menautkannya); no = tidak dipakai.
+ka_on() { [[ $1 == yes || $1 == external ]]; }
 
 ka_bind_addr() { if [[ $KA_ACCESS_MODE == lan ]]; then printf '0.0.0.0'; else printf '127.0.0.1'; fi; }
 
@@ -322,8 +327,8 @@ ka_render_portal() {
     --arg version "$KA_VERSION" --arg logo "$logo" \
     --arg url_dash "$KA_URL_DASHBOARD" --arg url_ruang "$KA_URL_RUANG" \
     --argjson dash_port "$KA_DASH_PORT" --argjson ruang_port "$KA_RUANG_PORT" \
-    --argjson dash_on "$([[ $KA_WITH_DASHBOARD == yes ]] && echo true || echo false)" \
-    --argjson ruang_on "$([[ $KA_WITH_RUANG == yes ]] && echo true || echo false)" \
+    --argjson dash_on "$(ka_on "$KA_WITH_DASHBOARD" && echo true || echo false)" \
+    --argjson ruang_on "$(ka_on "$KA_WITH_RUANG" && echo true || echo false)" \
     '{office:$office, brand:$brand, mode:$mode, version:$version, logo:$logo,
       dashboard:{enabled:$dash_on, port:$dash_port, url:$url_dash},
       ruang:{enabled:$ruang_on, port:$ruang_port, url:$url_ruang}}' >"$p/portal-config.json"
@@ -447,6 +452,17 @@ WantedBy=timers.target
 EOF
 }
 
+ka_enable_pengawas() {
+  ka_write_pengawas_units
+  systemctl daemon-reload
+  systemctl enable --now "$KA_PENGAWAS_UNIT.timer" >>"$KA_LOG" 2>&1
+  if [[ $KA_PENGAWAS_MODE == penuh ]]; then
+    systemctl enable --now "$KA_PENGAWAS_UNIT-harian.timer" >>"$KA_LOG" 2>&1
+  else
+    systemctl disable --now "$KA_PENGAWAS_UNIT-harian.timer" >>"$KA_LOG" 2>&1 || true
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # Cloudflare Tunnel (opsional, akun Cloudflare milik klien)
 # ---------------------------------------------------------------------------
@@ -473,7 +489,9 @@ ka_install_cloudflared() {
 # ---------------------------------------------------------------------------
 ka_apply_web() {
   systemctl daemon-reload
-  if [[ $KA_WITH_DASHBOARD == yes ]]; then
+  if [[ $KA_WITH_DASHBOARD == external ]]; then
+    :   # panel Hermes yang sudah ada dibiarkan apa adanya
+  elif [[ $KA_WITH_DASHBOARD == yes ]]; then
     ka_apply_dashboard_auth
     ka_write_dashboard_unit
     systemctl daemon-reload
@@ -504,8 +522,8 @@ ka_apply_web() {
 ka_urls_text() { # ringkasan alamat untuk ditampilkan
   local host; if [[ $KA_ACCESS_MODE == lan ]]; then host=$(local_ip); else host=127.0.0.1; fi
   [[ $KA_WITH_PORTAL == yes ]]    && printf 'Portal kantor : %s\n' "${KA_URL_PORTAL:-http://$host:$KA_PORTAL_PORT}"
-  [[ $KA_WITH_DASHBOARD == yes ]] && printf 'Panel Hermes  : %s\n' "${KA_URL_DASHBOARD:-http://$host:$KA_DASH_PORT}"
-  [[ $KA_WITH_RUANG == yes ]]     && printf 'Kantor 3D     : %s\n' "${KA_URL_RUANG:-http://$host:$KA_RUANG_PORT}"
+  ka_on "$KA_WITH_DASHBOARD" && printf 'Panel Hermes  : %s%s\n' "${KA_URL_DASHBOARD:-http://$host:$KA_DASH_PORT}" "$([[ $KA_WITH_DASHBOARD == external ]] && echo '  (sudah ada, dikelola terpisah)')"
+  ka_on "$KA_WITH_RUANG"     && printf 'Kantor 3D     : %s%s\n' "${KA_URL_RUANG:-http://$host:$KA_RUANG_PORT}" "$([[ $KA_WITH_RUANG == external ]] && echo '  (sudah ada, dikelola terpisah)')"
   if [[ $KA_ACCESS_MODE != lan ]]; then
     printf '\nMode lokal: buka lewat SSH tunnel dari laptop, contoh:\n'
     printf '  ssh -L %s:127.0.0.1:%s -L %s:127.0.0.1:%s -L %s:127.0.0.1:%s root@%s\n' \

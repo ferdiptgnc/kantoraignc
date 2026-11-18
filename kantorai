@@ -81,9 +81,11 @@ status_text() {
   printf 'Layanan:\n'
   unit_line "$KA_GATEWAY_UNIT" "Gateway Hermes"
   [[ $KA_WITH_DASHBOARD == yes ]] && unit_line "$KA_DASH_UNIT" "Panel Hermes" "${KA_URL_DASHBOARD:-http://$h:$KA_DASH_PORT}"
+  [[ $KA_WITH_DASHBOARD == external ]] && printf '  %-24s %-15s %s\n' "Panel Hermes" "terpisah" "${KA_URL_DASHBOARD:-http://$h:$KA_DASH_PORT}"
   [[ $KA_WITH_RUANG == yes ]] && unit_line "$KA_RUANG_UNIT" "Kantor 3D" "${KA_URL_RUANG:-http://$h:$KA_RUANG_PORT}"
+  [[ $KA_WITH_RUANG == external ]] && printf '  %-24s %-15s %s\n' "Kantor 3D" "terpisah" "${KA_URL_RUANG:-http://$h:$KA_RUANG_PORT}"
   [[ $KA_WITH_PORTAL == yes ]] && unit_line nginx "Portal (nginx)" "${KA_URL_PORTAL:-http://$h:$KA_PORTAL_PORT}"
-  [[ $KA_WITH_PENGAWAS == yes ]] && unit_line "$KA_PENGAWAS_UNIT.timer" "Pengawas (timer)"
+  [[ $KA_WITH_PENGAWAS == yes ]] && unit_line "$KA_PENGAWAS_UNIT.timer" "Pengawas ($KA_PENGAWAS_MODE)"
   [[ $KA_WITH_CLOUDFLARED == yes ]] && unit_line cloudflared "Cloudflare Tunnel"
   printf '\nKaryawan AI:\n'
   crew_lines
@@ -453,6 +455,15 @@ do_topics() {
   local name c th
   [[ -n $KA_TG_GROUP_ID ]] || { ui_msg "Belum ada grup" "Atur grup forum kantor dulu (Telegram -> Grup forum kantor)." 8; return 0; }
   name=$(pick_profile "Atur topik grup untuk:" default) || return 0
+  if grep -qE '^[[:space:]]*(ignored_threads|allowed_topics|group_topics):' "$(profile_cfg "$name")" 2>/dev/null; then
+    ui_yesno "Sudah ada pengaturan topik" \
+"Karyawan '$name' sudah punya pengaturan topik di config.yaml (ignored_threads / group_topics).
+
+Menu ini menulis TELEGRAM_ALLOWED_TOPICS di .env, yang dibaca Hermes LEBIH DULU dan bisa
+mengubah topik tempat $name menjawab. Biarkan saja bila pengaturan lama sudah benar.
+
+Tetap lanjutkan?" no 18 || return 0
+  fi
   c=$(ui_menu "Topik $name" "Topik saat ini: $(envget "$(profile_env "$name")" TELEGRAM_ALLOWED_TOPICS)\n(kosong = menjawab di semua topik)" \
        1 "Buat topik baru di grup" \
        2 "Pakai topik yang sudah ada (isi ID topik)" \
@@ -601,25 +612,24 @@ do_logo() {
 }
 
 do_components() {
-  local sel
-  sel=$(ui_checklist "Komponen" "Komponen aktif:" \
-        dashboard "Panel Hermes" "$([[ $KA_WITH_DASHBOARD == yes ]] && echo ON || echo OFF)" \
-        ruang "Kantor 3D" "$([[ $KA_WITH_RUANG == yes ]] && echo ON || echo OFF)" \
+  local sel old_dash=$KA_WITH_DASHBOARD old_ruang=$KA_WITH_RUANG
+  sel=$(ui_checklist "Komponen" "Komponen aktif (yang bertanda 'terpisah' sudah ada di server dan tidak dikelola kantorai):" \
+        dashboard "Panel Hermes$([[ $old_dash == external ]] && echo ' (terpisah)')" "$(ka_on "$KA_WITH_DASHBOARD" && echo ON || echo OFF)" \
+        ruang "Kantor 3D$([[ $old_ruang == external ]] && echo ' (terpisah)')" "$(ka_on "$KA_WITH_RUANG" && echo ON || echo OFF)" \
         portal "Portal kantor" "$([[ $KA_WITH_PORTAL == yes ]] && echo ON || echo OFF)" \
         pengawas "Pengawas" "$([[ $KA_WITH_PENGAWAS == yes ]] && echo ON || echo OFF)") || return 0
   KA_WITH_DASHBOARD=no; KA_WITH_RUANG=no; KA_WITH_PORTAL=no; KA_WITH_PENGAWAS=no
-  [[ $sel == *dashboard* ]] && KA_WITH_DASHBOARD=yes
-  [[ $sel == *ruang* ]] && KA_WITH_RUANG=yes
+  [[ $sel == *dashboard* ]] && { [[ $old_dash == external ]] && KA_WITH_DASHBOARD=external || KA_WITH_DASHBOARD=yes; }
+  [[ $sel == *ruang* ]] && { [[ $old_ruang == external ]] && KA_WITH_RUANG=external || KA_WITH_RUANG=yes; }
   [[ $sel == *portal* ]] && KA_WITH_PORTAL=yes
   [[ $sel == *pengawas* ]] && KA_WITH_PENGAWAS=yes
   if [[ $KA_WITH_PORTAL == yes || $KA_WITH_RUANG == yes ]] && ! command -v nginx >/dev/null 2>&1; then
     ui_info "Memasang nginx..."; apt-get install -y --no-install-recommends nginx >>"$KA_LOG" 2>&1
   fi
-  [[ $KA_WITH_DASHBOARD == yes ]] && ka_install_branding
+  ka_on "$KA_WITH_DASHBOARD" && ka_install_branding
   if [[ $KA_WITH_RUANG == yes && ! -x $KA_RUANG_CMD ]]; then ui_info "Memasang Kantor 3D (1-3 menit)..."; PR_TTY=0 ka_install_ruang >>"$KA_LOG" 2>&1 || KA_WITH_RUANG=no; fi
   if [[ $KA_WITH_PENGAWAS == yes ]]; then
-    ka_write_pengawas_units; systemctl daemon-reload
-    systemctl enable --now "$KA_PENGAWAS_UNIT.timer" "$KA_PENGAWAS_UNIT-harian.timer" >>"$KA_LOG" 2>&1
+    ka_enable_pengawas
   else
     systemctl disable --now "$KA_PENGAWAS_UNIT.timer" "$KA_PENGAWAS_UNIT-harian.timer" >>"$KA_LOG" 2>&1 || true
   fi
@@ -787,12 +797,18 @@ m_backup() {
 m_pengawas() {
   local c
   while c=$(ui_menu "Pengawas" "Pengawas mengecek layanan tiap 2 menit, memulihkan yang mati, dan melapor ke Telegram." \
-        1 "Status terakhir" 2 "Jalankan pemeriksaan sekarang" 3 "Kirim pesan uji" 4 "Kirim laporan harian sekarang"); do
+        1 "Status terakhir" 2 "Jalankan pemeriksaan sekarang" 3 "Kirim pesan uji" 4 "Kirim laporan harian sekarang" \
+        5 "Mode: $KA_PENGAWAS_MODE (ganti penuh/status)"); do
     case $c in
       1) local t; t=$(mktemp); jq . "$KA_WWW/status.json" >"$t" 2>&1 || echo "(belum ada status)" >"$t"; ui_text "Status Pengawas" "$t"; rm -f "$t" ;;
       2) ui_run "Pemeriksaan" "$KA_LIBDIR/pengawas.sh" periksa ;;
       3) ui_run "Pesan uji" "$KA_LIBDIR/pengawas.sh" uji ;;
       4) ui_run "Laporan harian" "$KA_LIBDIR/pengawas.sh" harian ;;
+      5) local m
+         m=$(ui_menu "Mode Pengawas" "penuh  = pulihkan layanan mati, kirim notifikasi, backup harian\nstatus = hanya mencatat status untuk portal/panel (bila server sudah punya watchdog lain)" \
+               penuh "Pulihkan + notifikasi + backup" status "Hanya catat status") || continue
+         KA_PENGAWAS_MODE=$m; conf_set KA_PENGAWAS_MODE "$m"; ka_enable_pengawas
+         ui_msg "Mode Pengawas" "Mode Pengawas: $m" 8 ;;
     esac
   done
 }
@@ -803,7 +819,8 @@ m_pengawas() {
 update_hermes() {
   run_tty bash -c "HOME=$KA_ROOT_HOME '$HERMES_BIN' update"
   gateway_restart >>"$KA_LOG" 2>&1 || true
-  [[ $KA_WITH_DASHBOARD == yes ]] && { ka_install_branding; systemctl restart "$KA_DASH_UNIT"; }
+  ka_on "$KA_WITH_DASHBOARD" && ka_install_branding
+  [[ $KA_WITH_DASHBOARD == yes ]] && systemctl restart "$KA_DASH_UNIT"
   return 0
 }
 update_ruang() {
@@ -869,13 +886,20 @@ do_uninstall() {
         "$KA_SYSTEMD_DIR/$KA_PENGAWAS_UNIT".{service,timer} "$KA_SYSTEMD_DIR/$KA_PENGAWAS_UNIT-harian".{service,timer}
   rm -f "$KA_NGINX_CONF"; ka_nginx_reload || true
   rm -rf "$KA_WWW" "$HERMES_HOME/plugins/$KA_PLUGIN_NAME" "$HERMES_HOME/dashboard-themes/gnc.yaml"
-  read -r -p "Hapus juga Kantor 3D (Ruang)? [y/N] " a
-  if [[ $a =~ ^[Yy] ]]; then curl -fsSL "$KA_RUANG_INSTALL_URL" | env -u RUANG_BIN -u RUANG_HOME HOME=$KA_ROOT_HOME bash -s -- --uninstall || true; fi
-  read -r -p "Hapus juga Hermes Agent BESERTA semua karyawan & datanya? [y/N] " a
-  if [[ $a =~ ^[Yy] ]]; then
-    hm gateway uninstall --system >/dev/null 2>&1 || true
-    hm uninstall || true
+  if [[ $(conf_get KA_ADOPTED no) == yes ]]; then
+    echo "Server ini dipasang dengan mode adopsi: Hermes, karyawan, gateway, dan Kantor 3D yang sudah ada dibiarkan."
+  else
+    if [[ $KA_WITH_RUANG == yes ]]; then
+      read -r -p "Hapus juga Kantor 3D (Ruang)? [y/N] " a
+      if [[ $a =~ ^[Yy] ]]; then curl -fsSL "$KA_RUANG_INSTALL_URL" | env -u RUANG_BIN -u RUANG_HOME HOME=$KA_ROOT_HOME bash -s -- --uninstall || true; fi
+    fi
+    read -r -p "Hapus juga Hermes Agent BESERTA semua karyawan & datanya? [y/N] " a
+    if [[ $a =~ ^[Yy] ]]; then
+      hm gateway uninstall --system >/dev/null 2>&1 || true
+      hm uninstall || true
+    fi
   fi
+  hm config set dashboard.theme default >/dev/null 2>&1 || true
   systemctl daemon-reload
   rm -rf "$KA_HOME" "$KA_LIBDIR" "$KA_ETC" "$KA_PROFILE_D/kantorai.sh" "$KA_BINDIR/kantorai"
   echo "GNC Kantor AI dihapus. Backup tetap ada di $KA_BACKUP_DIR."

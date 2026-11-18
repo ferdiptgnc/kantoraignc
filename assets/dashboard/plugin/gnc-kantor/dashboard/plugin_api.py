@@ -188,7 +188,7 @@ def overview() -> dict[str, Any]:
         "telegram_group": bool(conf.get("KA_TG_GROUP_ID")),
         "links": {
             "ruang": conf.get("KA_URL_RUANG", ""),
-            "ruang_port": conf.get("KA_RUANG_PORT", "3001") if conf.get("KA_WITH_RUANG", "yes") == "yes" else "",
+            "ruang_port": conf.get("KA_RUANG_PORT", "3001") if conf.get("KA_WITH_RUANG", "yes") in ("yes", "external") else "",
             "portal": conf.get("KA_URL_PORTAL", ""),
             "portal_port": conf.get("KA_PORTAL_PORT", "8080") if conf.get("KA_WITH_PORTAL", "yes") == "yes" else "",
         },

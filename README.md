@@ -56,6 +56,18 @@ bash install-kantorai.sh --unattended --config klien-a.conf
 shred -u klien-a.conf      # hapus: berisi token & password
 ```
 
+### Server yang sudah menjalankan Hermes (mode adopsi)
+
+Untuk server yang sudah berisi karyawan AI, misalnya kantor AI GNC di CT 104. Mode ini **tidak menyentuh** gateway (tidak di-restart), karyawan beserta SOUL/memori/skill/cron, Telegram, model, `.env`, zona waktu, maupun Kantor 3D dan Panel Hermes yang sudah berjalan. Yang ditambahkan hanya menu `kantorai`, portal, tema & plugin GNC, dan Pengawas mode *status* (hanya mencatat status, tanpa restart dan notifikasi, karena server sudah punya watchdog sendiri).
+
+```bash
+wget -qO /root/install-kantorai.sh https://raw.githubusercontent.com/ferdiptgnc/kantoraignc/main/install-kantorai.sh
+bash /root/install-kantorai.sh --adopt --check   # tampilkan rencana perubahan, tidak mengubah apa pun
+bash /root/install-kantorai.sh --adopt           # terapkan setelah rencana diperiksa
+```
+
+Kantor 3D atau Panel Hermes yang sudah ada ditandai *terpisah* (`external`): portal dan panel hanya menautkannya. Mode Pengawas bisa diganti lewat `kantorai` → Pengawas. Pada server adopsi, `kantorai uninstall` tidak menawarkan penghapusan Hermes maupun Kantor 3D.
+
 ## Setelah terpasang
 
 ```bash
@@ -179,7 +191,7 @@ bash uji/uji_kantorai.sh      # butuh: bash, jq, nginx, openssl, python3, node
 ```
 
 Uji ini berjalan di folder sementara dengan Hermes, systemd, dan API Telegram tiruan, tanpa menyentuh sistem asli. Yang dicakup:
-- instalasi tanpa dialog dan mode perbaikan
+- instalasi tanpa dialog, mode perbaikan, dan mode adopsi (memastikan gateway tidak di-restart dan data karyawan tidak berubah)
 - menu karyawan, grup, dan topik
 - mode akses, dengan `nginx -t` memakai nginx asli
 - Pengawas: pemulihan, notifikasi, dan backup

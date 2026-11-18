@@ -8,7 +8,7 @@
 #  environment, terutama untuk pengujian (lihat uji/).
 # ============================================================================
 
-KA_VERSION="1.1.0"
+KA_VERSION="1.2.0"
 : "${KA_REPO:=ferdiptgnc/kantoraignc}"
 : "${KA_BRANCH:=main}"
 : "${KA_HOME:=/opt/kantorai}"                 # salinan repo + aset

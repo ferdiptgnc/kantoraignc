@@ -25,6 +25,8 @@ MAX_RESTART_PER_HOUR=${KA_MAX_RESTART_PER_HOUR:-3}
 DISK_WARN=${KA_DISK_WARN:-90}
 MEM_WARN=${KA_MEM_WARN:-92}
 QUIET=0
+MODE=$(conf_get KA_PENGAWAS_MODE penuh)   # penuh | status (server dengan watchdog lain: hanya tulis status.json)
+[[ $MODE == status ]] && QUIET=1
 
 mkdir -p "$STATE_DIR"
 exec 9>"$STATE_DIR/.lock"
@@ -96,7 +98,9 @@ check_units() {
     systemctl cat "$u" >/dev/null 2>&1 || continue   # belum terpasang
     state=$(svc_state "$u")
     prev=$(st_get "state.$u")
-    if [[ $state != active ]]; then
+    if [[ $MODE == status ]]; then
+      :   # mode status: hanya mencatat, tidak me-restart apa pun
+    elif [[ $state != active ]]; then
       if restart_allowed "$u"; then
         logf "pengawas: $u $state -> restart"
         if [[ $u == "$KA_GATEWAY_UNIT" ]]; then gateway_restart; else systemctl restart "$u" >>"$KA_LOG" 2>&1; fi
@@ -203,7 +207,7 @@ do_harian() {
   • $p${desc:+ — $desc}"
   done
   svc=$(jq -r '.services[] | "  • \(.label): \(if .state == "active" then "normal" else .state end)"' "$STATUS_JSON" 2>/dev/null)
-  if [[ $(conf_get KA_AUTO_BACKUP yes) == yes ]]; then
+  if [[ $MODE == penuh && $(conf_get KA_AUTO_BACKUP yes) == yes ]]; then
     if bk=$(do_backup); then bk="✅ Backup harian: $(basename "$bk") ($(du -h "$bk" | cut -f1))"
     else bk="⚠️ Backup harian GAGAL (cek kantorai logs installer)"; fi
   fi
