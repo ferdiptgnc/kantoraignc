@@ -24,7 +24,7 @@
 
 set -Euo pipefail
 
-INSTALLER_VERSION="1.0.0"
+INSTALLER_VERSION="1.1.0"
 REPO_DEFAULT="ferdiptgnc/kantoraignc"
 
 b_say() { printf '\e[36m==>\e[0m %s\n' "$*"; }
@@ -154,12 +154,16 @@ check_internet() {
 }
 
 install_prereqs() {
-  say "Memasang paket dasar (whiptail, curl, git, nginx, jq, ...)"
-  apt-get update >>"$KA_LOG" 2>&1 || die "apt-get update gagal (lihat $KA_LOG)"
   local pk=(ca-certificates curl wget git whiptail jq tar gzip unzip xz-utils openssl procps iproute2 nano less cron)
   if [[ $KA_WITH_PORTAL == yes || $KA_WITH_RUANG == yes ]]; then pk+=(nginx); fi
-  apt-get install -y --no-install-recommends "${pk[@]}" >>"$KA_LOG" 2>&1 || die "Gagal memasang paket dasar (lihat $KA_LOG)"
-  okp "Paket dasar terpasang"
+  say "Paket dasar sistem"
+  pr_begin
+  pr_task 0 35 25 "Memperbarui daftar paket (apt-get update)" apt-get update \
+    || { pr_end 1 "apt-get update gagal (lihat $KA_LOG)"; exit 1; }
+  pr_task 35 100 60 "Memasang ${#pk[@]} paket: whiptail, curl, git, jq, nginx, ..." \
+    apt-get install -y --no-install-recommends "${pk[@]}" \
+    || { pr_end 1 "Gagal memasang paket dasar (lihat $KA_LOG)"; exit 1; }
+  pr_end 0 "Paket dasar terpasang"
 }
 
 # ---------------------------------------------------------------------------
@@ -313,12 +317,18 @@ Instalasi memakan waktu 5-15 menit tergantung internet."
 # ---------------------------------------------------------------------------
 # Langkah instalasi
 # ---------------------------------------------------------------------------
-STEP=0; STEPS=10
-step() { STEP=$((STEP + 1)); printf '\n%s[%d/%d]%s %s\n' "$C_BLU" "$STEP" "$STEPS" "$C_RST" "$*"; logf "== $* =="; }
+STEP=0; STEPS=10; T_START=$SECONDS
+step() {
+  STEP=$((STEP + 1))
+  printf '\n%s[%d/%d]%s %s%s  %s(total %d%% · %s)%s\n' "$C_BLU" "$STEP" "$STEPS" "$C_RST" "$*" "" \
+    "$C_DIM" $(( (STEP - 1) * 100 / STEPS )) "$(fmt_dur $(( SECONDS - T_START )))" "$C_RST"
+  logf "== $* =="
+}
 FAILED=()
 
 do_install() {
   TUI=0
+  T_START=$SECONDS
   ((! UNATTENDED)) && clear
   show_banner
 
@@ -402,7 +412,7 @@ write_info() {
 
 final_report() {
   local msg st
-  msg="GNC Kantor AI selesai dipasang.
+  msg="GNC Kantor AI selesai dipasang dalam $(fmt_dur $(( SECONDS - T_START ))).
 
 $(ka_urls_text)
 "

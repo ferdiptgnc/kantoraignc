@@ -98,22 +98,58 @@ EOF
 # ---------------------------------------------------------------------------
 # Hermes Agent
 # ---------------------------------------------------------------------------
+# Label Indonesia + perkiraan durasi (detik) tiap tahap installer resmi Hermes.
+hermes_stage_info() { # NAMA "judul manifest" -> "label|detik"
+  case $1 in
+    prerequisites) echo "Memeriksa & memasang prasyarat sistem|45" ;;
+    repository)    echo "Mengunduh kode Hermes Agent|40" ;;
+    venv)          echo "Menyiapkan Python khusus Hermes|40" ;;
+    python-deps)   echo "Memasang dependensi Python|150" ;;
+    config)        echo "Menyiapkan konfigurasi & skill bawaan|20" ;;
+    products)      echo "Memasang perintah hermes & membangun aplikasi web|120" ;;
+    complete)      echo "Menyelesaikan instalasi|15" ;;
+    *)             echo "${2:-$1}|30" ;;
+  esac
+}
+
 ka_install_hermes() {
   if hermes_ok; then
     okp "Hermes Agent sudah terpasang ($(hm --version 2>/dev/null | head -1))"
     return 0
   fi
-  local args=(--non-interactive --skip-computer-use)
+  local inst="$KA_VAR/hermes-install.sh" args=(--non-interactive --skip-computer-use) manifest
+  local names=() labels=() secs=() total=0 cum=0 i n name title needs info rc=0
   [[ $KA_WITH_BROWSER == yes ]] || args+=(--skip-browser)
-  say "Memasang Hermes Agent (beberapa menit, log: $KA_LOG)..."
-  if ! curl -fsSL --retry 3 "$KA_HERMES_INSTALL_URL" -o "$KA_VAR/hermes-install.sh"; then
-    errp "Gagal mengunduh installer Hermes dari $KA_HERMES_INSTALL_URL"; return 1
+  mkdir -p "$KA_VAR"
+  pr_begin
+  pr_task 0 3 5 "Mengunduh installer resmi Hermes Agent" curl -fsSL --retry 3 "$KA_HERMES_INSTALL_URL" -o "$inst" \
+    || { pr_end 1 "Gagal mengunduh installer Hermes ($KA_HERMES_INSTALL_URL)"; return 1; }
+
+  # Jalankan per tahap (protokol --manifest/--stage resmi Hermes) agar progres nyata.
+  manifest=$(HOME=$KA_ROOT_HOME bash "$inst" --manifest 2>/dev/null) || manifest=""
+  while IFS='|' read -r name title needs; do
+    [[ -n $name ]] || continue
+    [[ $needs == true ]] && continue          # setup & gateway diatur kantorai
+    info=$(hermes_stage_info "$name" "$title")
+    names+=("$name"); labels+=("${info%%|*}"); secs+=("${info##*|}"); total=$(( total + ${info##*|} ))
+  done < <(jq -r '.stages[]? | "\(.name)|\(.title)|\(.needs_user_input)"' <<<"$manifest" 2>/dev/null)
+
+  if ((${#names[@]} == 0)); then
+    # Installer lama/baru tanpa manifest: jalankan sekaligus, progres berdasarkan waktu.
+    pr_task 3 99 300 "Memasang Hermes Agent (semua tahap)" env HOME="$KA_ROOT_HOME" bash "$inst" "${args[@]}" || rc=$?
+  else
+    n=${#names[@]}
+    for ((i = 0; i < n; i++)); do
+      local from=$(( 3 + 96 * cum / total )) to
+      cum=$(( cum + secs[i] )); to=$(( 3 + 96 * cum / total ))
+      pr_task "$from" "$to" "${secs[i]}" "Tahap $((i + 1))/$n · ${labels[i]}" \
+        env HOME="$KA_ROOT_HOME" bash "$inst" --stage "${names[i]}" "${args[@]}" || { rc=$?; break; }
+    done
   fi
-  if ! HOME=$KA_ROOT_HOME bash "$KA_VAR/hermes-install.sh" "${args[@]}" >>"$KA_LOG" 2>&1; then
-    errp "Installer Hermes gagal. Lihat: tail -50 $KA_LOG"; return 1
+  if ((rc != 0)) || ! hermes_ok; then
+    pr_end 1 "Instalasi Hermes gagal di: ${PR_STATUS}. Lihat: tail -50 $KA_LOG"; return 1
   fi
-  hermes_ok || { errp "Perintah hermes tidak ditemukan di $HERMES_BIN setelah instalasi."; return 1; }
-  okp "Hermes Agent terpasang ($(hm --version 2>/dev/null | head -1))"
+  pr_end 0 "Hermes Agent terpasang ($(hm --version 2>/dev/null | head -1))"
 }
 
 # Bot admin (profil default) + user yang diizinkan
@@ -221,14 +257,15 @@ ka_install_ruang() {
     okp "Kantor 3D (Ruang) sudah terpasang"
     return 0
   fi
-  say "Memasang Kantor 3D (Ruang)..."
-  if ! curl -fsSL --retry 3 "$KA_RUANG_INSTALL_URL" -o "$KA_VAR/ruang-install.sh"; then
-    errp "Gagal mengunduh installer Ruang"; return 1
-  fi
-  if env -u RUANG_BIN -u RUANG_HOME HOME=$KA_ROOT_HOME bash "$KA_VAR/ruang-install.sh" >>"$KA_LOG" 2>&1 && [[ -x $KA_RUANG_CMD ]]; then
-    okp "Kantor 3D terpasang"
+  mkdir -p "$KA_VAR"
+  pr_begin
+  pr_task 0 5 5 "Mengunduh installer Kantor 3D (Ruang)" curl -fsSL --retry 3 "$KA_RUANG_INSTALL_URL" -o "$KA_VAR/ruang-install.sh" \
+    || { pr_end 1 "Gagal mengunduh installer Ruang"; return 1; }
+  if pr_task 5 99 90 "Memasang Kantor 3D (unduh rilis & Node.js bila perlu)" \
+       env -u RUANG_BIN -u RUANG_HOME HOME="$KA_ROOT_HOME" bash "$KA_VAR/ruang-install.sh" && [[ -x $KA_RUANG_CMD ]]; then
+    pr_end 0 "Kantor 3D terpasang"
   else
-    errp "Installer Ruang gagal. Lihat: tail -50 $KA_LOG"; return 1
+    pr_end 1 "Installer Ruang gagal. Lihat: tail -50 $KA_LOG"; return 1
   fi
 }
 

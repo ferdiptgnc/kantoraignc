@@ -616,7 +616,7 @@ do_components() {
     ui_info "Memasang nginx..."; apt-get install -y --no-install-recommends nginx >>"$KA_LOG" 2>&1
   fi
   [[ $KA_WITH_DASHBOARD == yes ]] && ka_install_branding
-  if [[ $KA_WITH_RUANG == yes && ! -x $KA_RUANG_CMD ]]; then ui_info "Memasang Kantor 3D..."; ka_install_ruang >>"$KA_LOG" 2>&1 || KA_WITH_RUANG=no; fi
+  if [[ $KA_WITH_RUANG == yes && ! -x $KA_RUANG_CMD ]]; then ui_info "Memasang Kantor 3D (1-3 menit)..."; PR_TTY=0 ka_install_ruang >>"$KA_LOG" 2>&1 || KA_WITH_RUANG=no; fi
   if [[ $KA_WITH_PENGAWAS == yes ]]; then
     ka_write_pengawas_units; systemctl daemon-reload
     systemctl enable --now "$KA_PENGAWAS_UNIT.timer" "$KA_PENGAWAS_UNIT-harian.timer" >>"$KA_LOG" 2>&1

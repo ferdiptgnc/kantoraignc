@@ -43,7 +43,7 @@ Wizard akan menanyakan:
 6. Bot admin Telegram dan user ID.
 7. Model AI, dipilih lewat menu resmi Hermes.
 
-Instalasi memakan waktu sekitar 5–15 menit. Ringkasannya tersimpan di `/etc/kantorai/INSTALL-INFO.txt` (hanya bisa dibaca root), dan log-nya di `/var/log/kantorai.log`.
+Instalasi memakan waktu sekitar 5–15 menit. Selama langkah panjang (paket sistem, Hermes Agent per tahap, Kantor 3D), installer menampilkan progress bar, persentase, waktu berjalan, tahap saat ini, dan baris terakhir log. Ringkasannya tersimpan di `/etc/kantorai/INSTALL-INFO.txt` (hanya bisa dibaca root), dan log-nya di `/var/log/kantorai.log`.
 
 ### Tanpa dialog (banyak klien)
 
@@ -111,7 +111,10 @@ Isi menu utama:
 - Diagnosa
 - Info
 
-Terminal tanpa whiptail bisa memakai menu teks biasa: `KA_PLAIN=1 kantorai`.
+Pilihan tampilan terminal:
+- Menu teks biasa (tanpa whiptail): `KA_PLAIN=1 kantorai`.
+- Simbol ASCII saja, untuk terminal yang tidak mendukung UTF-8: `KA_ASCII=1 kantorai`. Installer dan menu otomatis memakai locale `C.UTF-8` bila locale server masih `POSIX`.
+- Tanpa progress bar animasi (mis. saat output dialihkan ke file): `KA_NO_PROGRESS=1`.
 
 ## Mode akses & keamanan
 

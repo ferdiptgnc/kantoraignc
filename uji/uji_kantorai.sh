@@ -87,6 +87,8 @@ check "portal-config.json valid & nama kantor" bash -c "jq -e '.office == \"PT U
 check "konfigurasi branding Ruang disalin" test -f "$KA_WWW/ruang-brand/config.json" -a -f "$KA_WWW/ruang-brand/brand.js"
 check "status.json ditulis Pengawas" bash -c "jq -e '(.services | length) >= 4 and (.crew[0].name == \"default\") and .crew[0].telegram == true' '$KA_WWW/status.json'"
 check "INSTALL-INFO chmod 600 & berisi password" bash -c "[[ \$(stat -c %a '$KA_INFO') == 600 ]] && grep -q RahasiaWeb12345 '$KA_INFO'"
+check "Hermes dipasang per tahap (protokol --manifest/--stage)" bash -c "grep -q 'Tahap 1/3 · Memeriksa' '$KA_LOG' && grep -q 'Tahap 3/3 · Menyelesaikan' '$KA_LOG'"
+check "tahap interaktif Hermes (setup) dilewati" hasnt "$KA_LOG" "tahap setup mulai"
 check "token admin tidak bocor ke log kantorai" hasnt "$KA_LOG" "$ADMIN_TOKEN"
 check "token admin tidak muncul di argumen perintah" hasnt "$MOCK_LOG" "$ADMIN_TOKEN"
 check "kunci model tidak muncul di argumen perintah" hasnt "$MOCK_LOG" "sk-or-v1-kunciujicoba"
@@ -99,7 +101,7 @@ check "status: menampilkan gateway aktif" grep -q "Gateway Hermes.*aktif" "$T/st
 check "status: menampilkan nama kantor" has "$T/status.out" "PT Uji Coba Sejahtera"
 ka karyawan daftar >"$T/daftar.out" 2>&1
 check "daftar karyawan memuat admin" grep -q "^  default .*bot ✓" "$T/daftar.out"
-ka version | grep -q "GNC Kantor AI 1.0.0"; check "kantorai version" test $? -eq 0
+ka version | grep -q "GNC Kantor AI 1.1.0"; check "kantorai version" test $? -eq 0
 ka perintah-ngawur >/dev/null 2>&1; check "perintah tidak dikenal ditolak (kode 2)" test $? -eq 2
 
 section "3. Tambah karyawan (menu teks, KA_PLAIN=1)"
@@ -224,6 +226,25 @@ check "overview: tidak membocorkan token/kunci" bash -c "! grep -qE 'AAH_|sk-or-
 section "10. Plugin dashboard (render JS dengan React tiruan)"
 API_JSON="$T/api.json" node "$REPO/uji/render_plugin.js" "$REPO" >"$T/js.out" 2>&1
 check "plugin Kantor ter-render tanpa error" grep -q "RENDER-OK" "$T/js.out"
+
+section "11. Installer Hermes gagal di tengah tahap"
+T2=$(mktemp -d /tmp/kantorai-uji2.XXXXXX)
+(
+  export KA_ROOT_HOME=$T2/root HERMES_HOME=$T2/root/.hermes HERMES_BIN=$T2/root/.local/bin/hermes KA_RUANG_CMD=$T2/root/.local/bin/ruang
+  export KA_HOME=$T2/opt KA_ETC=$T2/etc KA_CONF=$T2/etc/kantorai.conf KA_INFO=$T2/etc/INFO KA_HTPASSWD=$T2/etc/ht KA_VAR=$T2/var KA_WWW=$T2/www
+  export KA_BACKUP_DIR=$T2/bak KA_LOG=$T2/kantorai.log KA_LIBDIR=$T2/lib KA_BINDIR=$T2/bin KA_SYSTEMD_DIR=$T2/systemd KA_NGINX_CONF=$T2/nginx.conf KA_PROFILE_D=$T2/pd
+  export MOCK_STATE=$T2/state MOCK_LOG=$T2/state/mock.log MOCK_FAIL_STAGE=python-deps
+  mkdir -p "$MOCK_STATE" "$KA_ROOT_HOME/.local/bin" "$KA_PROFILE_D"
+  for m in "$MOCKS"/*; do [[ $(basename "$m") == hermes ]] || cp "$m" "$KA_ROOT_HOME/.local/bin/"; done
+  export PATH="$KA_ROOT_HOME/.local/bin:$PATH"
+  printf 'KA_ACCESS_MODE=local\nKA_MODEL_MODE=skip\n' >"$T2/c.conf"
+  bash "$REPO/install-kantorai.sh" --unattended --config "$T2/c.conf" --source "$REPO" >"$T2/out" 2>&1
+  echo "rc=$?" >>"$T2/out"
+)
+check "installer berhenti dengan kode gagal" grep -q "rc=1" "$T2/out"
+check "pesan menyebut tahap yang gagal" grep -q "Instalasi Hermes gagal di: Tahap 2/3 · Memasang dependensi Python" "$T2/out"
+check "tahap setelah gagal tidak dijalankan" bash -c "! grep -q 'tahap complete mulai' '$T2/kantorai.log'"
+rm -rf "$T2"
 
 # ---------------------------------------------------------------------------
 printf '\n\e[1m%d lulus, %d gagal\e[0m\n' "$PASS" "$FAIL"

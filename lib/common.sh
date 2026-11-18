@@ -8,7 +8,7 @@
 #  environment, terutama untuk pengujian (lihat uji/).
 # ============================================================================
 
-KA_VERSION="1.0.0"
+KA_VERSION="1.1.0"
 : "${KA_REPO:=ferdiptgnc/kantoraignc}"
 : "${KA_BRANCH:=main}"
 : "${KA_HOME:=/opt/kantorai}"                 # salinan repo + aset
@@ -42,6 +42,38 @@ KA_PENGAWAS_UNIT="kantorai-pengawas"
 KA_RESERVED_NAMES=" default hermes kantorai root admin all gateway dashboard ruang pengawas "
 
 export PATH="$KA_ROOT_HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
+
+# ---------------------------------------------------------------------------
+# Locale: Debian/Ubuntu baru sering memakai POSIX, sehingga whiptail menampilkan
+# karakter UTF-8 (• — ·) sebagai <80>. Pakai C.UTF-8 bila ada; kalau tidak ada,
+# teks whiptail diubah ke ASCII (KA_ASCII=1 juga bisa dipaksa dari luar).
+# ---------------------------------------------------------------------------
+ka_setup_locale() {
+  case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in *[Uu][Tt][Ff]-8*|*[Uu][Tt][Ff]8*) return 0 ;; esac
+  if locale -a 2>/dev/null | grep -qiE '^c\.utf-?8$'; then
+    export LANG=C.UTF-8 LC_ALL=C.UTF-8
+  else
+    KA_ASCII=1
+  fi
+}
+ka_setup_locale
+: "${KA_ASCII:=0}"
+
+ascii_text() { # ganti simbol UTF-8 dengan padanan ASCII
+  # shellcheck disable=SC1111
+  sed -e 's/•/*/g; s/—/-/g; s/–/-/g; s/·/|/g; s/✓/OK/g; s/✗/X/g; s/→/->/g; s/←/<-/g; s/…/.../g' \
+      -e "s/[’‘]/'/g; s/[“”]/\"/g" | iconv -f UTF-8 -t ASCII//TRANSLIT 2>/dev/null
+}
+# Semua pemanggilan whiptail lewat fungsi ini (mode ASCII bila perlu).
+whiptail() {
+  if [[ $KA_ASCII == 1 ]]; then
+    local a _wt_args=()
+    for a in "$@"; do _wt_args+=("$(printf '%s' "$a" | ascii_text)"); done
+    command whiptail "${_wt_args[@]}"
+  else
+    command whiptail "$@"
+  fi
+}
 
 # ---------------------------------------------------------------------------
 # Tampilan
@@ -175,7 +207,13 @@ ui_pass() {
 }
 # ui_text "Judul" file   -> tampilkan isi file
 ui_text() {
-  if ((TUI)); then whiptail --backtitle "$BT" --title "$1" --scrolltext --textbox "$2" 24 "$W" >"$KA_TTY"
+  if ((TUI)); then
+    if [[ $KA_ASCII == 1 ]]; then
+      local tmp; tmp=$(mktemp); ascii_text <"$2" >"$tmp"
+      whiptail --backtitle "$BT" --title "$1" --scrolltext --textbox "$tmp" 24 "$W" >"$KA_TTY"; rm -f "$tmp"
+    else
+      whiptail --backtitle "$BT" --title "$1" --scrolltext --textbox "$2" 24 "$W" >"$KA_TTY"
+    fi
   else cat "$2"; fi
 }
 # ui_run "Judul" perintah...  -> jalankan, tampilkan output
@@ -204,6 +242,90 @@ redact_stream() {
           s#[0-9]{6,}:[A-Za-z0-9_-]{30,}#***:***#g;
           s#(sk-[A-Za-z0-9_-]{4})[A-Za-z0-9_-]{16,}#\1***#g;
           s#((API_KEY|TOKEN|SECRET|PASSWORD)[A-Z_]*=).+#\1***#g'
+}
+
+# ---------------------------------------------------------------------------
+# Progress bar untuk proses panjang (installer)
+#   pr_begin
+#   pr_task DARI% SAMPAI% PERKIRAAN_DETIK "Status" perintah...   (output -> $KA_LOG)
+#   pr_end 0|1 "Pesan akhir"
+# Di terminal: bar, persen, waktu berjalan, spinner, dan baris terakhir log.
+# Tanpa terminal (unattended ke file): satu baris per tahap + kabar tiap 30 detik.
+# ---------------------------------------------------------------------------
+PR_TTY=0; [[ -t 1 && ${KA_NO_PROGRESS:-0} != 1 ]] && PR_TTY=1
+PR_DRAWN=0; PR_T0=0; PR_PCT=0; PR_STATUS=""; PR_LOG_OFF=0
+fmt_dur() { printf '%02d:%02d' $(( $1 / 60 )) $(( $1 % 60 )); }
+pr_cols() { local c; c=$(tput cols 2>/dev/null || echo 80); ((c < 50)) && c=50; ((c > 110)) && c=110; printf '%s' "$c"; }
+pr_fit() { local s=$1 n=$2; ((${#s} > n)) && s="${s:0:$((n - 1))}…"; printf '%s' "$s"; }
+pr_bar() { # pr_bar PERSEN LEBAR
+  local f=$(( $1 * $2 / 100 )) e full empty
+  e=$(( $2 - f ))
+  printf -v full '%*s' "$f" ''; printf -v empty '%*s' "$e" ''
+  if [[ $KA_ASCII == 1 ]]; then printf '%s%s' "${full// /#}" "${empty// /-}"
+  else printf '%s%s' "${full// /█}" "${empty// /░}"; fi
+}
+pr_detail() { # baris terakhir yang berarti dari log (tanpa warna, token disensor)
+  tail -c "+$(( PR_LOG_OFF + 1 ))" "$KA_LOG" 2>/dev/null | tail -n 40 | tr '\r' '\n' | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g' \
+    | grep -v -E '^[[:space:]]*$|^\[[0-9-]{10} [0-9:]{8}\] (==|OK:|WARN:)' | tail -n 1 | redact_stream \
+    | sed 's/^[[:space:]]*//'
+}
+pr_draw() { # pr_draw PERSEN "status" "detail" [ikon]
+  local p=$1 st=$2 det=$3 icon=${4:-} cols bw el color=$C_BLU
+  cols=$(pr_cols); bw=$(( cols - 30 )); ((bw > 46)) && bw=46
+  el=$(( SECONDS - PR_T0 ))
+  [[ $icon == ok ]] && { color=$C_GRN; icon="✓"; }
+  [[ $icon == fail ]] && { color=$C_RED; icon="✗"; }
+  ((PR_DRAWN)) && printf '\e[3F'
+  printf '\e[2K  %s%s%s %3d%%  %s%s%s  %s\n' "$color" "$(pr_bar "$p" "$bw")" "$C_RST" "$p" "$C_DIM" "$(fmt_dur "$el")" "$C_RST" "$icon"
+  printf '\e[2K  %s\n' "$(pr_fit "$st" $(( cols - 4 )))"
+  printf '\e[2K  %s› %s%s\n' "$C_DIM" "$(pr_fit "${det:-…}" $(( cols - 6 )))" "$C_RST"
+  PR_DRAWN=1
+}
+pr_begin() {
+  PR_DRAWN=0; PR_T0=$SECONDS; PR_PCT=0
+  ((PR_TTY)) && printf '\e[?25l'   # sembunyikan kursor selama progress
+  return 0
+}
+pr_task() { # pr_task DARI SAMPAI PERKIRAAN_DETIK "status" perintah...
+  local from=$1 to=$2 expect=$3 st=$4 pid rc t0 t p frames='|/-\' i=0 last=0
+  shift 4
+  [[ $KA_ASCII == 1 ]] || frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+  PR_STATUS=$st
+  logf "== $st =="
+  PR_LOG_OFF=$(stat -c %s "$KA_LOG" 2>/dev/null || echo 0)
+  ( "$@" ) </dev/null >>"$KA_LOG" 2>&1 &
+  pid=$!
+  trap 'kill "$pid" 2>/dev/null; printf "\e[?25h\n"; exit 130' INT TERM
+  t0=$SECONDS
+  ((PR_TTY)) || printf '  ... %s\n' "$st"
+  while kill -0 "$pid" 2>/dev/null; do
+    t=$(( SECONDS - t0 ))
+    # kurva mendekati batas atas tahap tanpa pernah melewatinya
+    p=$(( from + (to - from) * t / (t + expect) ))
+    ((p >= to)) && p=$(( to - 1 )); ((p < from)) && p=$from
+    PR_PCT=$p
+    if ((PR_TTY)); then
+      pr_draw "$p" "$st" "$(pr_detail)" "${frames:$(( i % ${#frames} )):1}"
+      i=$(( i + 1 )); sleep 0.2
+    else
+      if (( t - last >= 30 )); then printf '      masih berjalan %s · %s\n' "$(fmt_dur "$t")" "$(pr_fit "$(pr_detail)" 70)"; last=$t; fi
+      sleep 1
+    fi
+  done
+  wait "$pid"; rc=$?
+  trap - INT TERM
+  ((rc == 0)) && PR_PCT=$to
+  return $rc
+}
+pr_end() { # pr_end KODE "pesan"
+  if ((PR_TTY)); then
+    if (($1 == 0)); then pr_draw 100 "$2" "selesai dalam $(fmt_dur $(( SECONDS - PR_T0 )))" ok
+    else pr_draw "$PR_PCT" "$2" "$(pr_detail)" fail; fi
+    printf '\e[?25h'
+  fi
+  if ((PR_TTY)); then logf "$2"
+  elif (($1 == 0)); then okp "$2"; else errp "$2"; fi
+  PR_DRAWN=0
 }
 
 # ---------------------------------------------------------------------------

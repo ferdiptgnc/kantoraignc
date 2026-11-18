@@ -14,7 +14,19 @@ while (($#)); do
 done
 if ((usecfg)); then url=$(sed -n 's/^url = "\(.*\)"$/\1/p'); fi
 case $url in
-  *hermes*install.sh) printf '#!/bin/sh\nmkdir -p "$HOME/.local/bin"; cp "%s/hermes" "$HOME/.local/bin/hermes"; chmod +x "$HOME/.local/bin/hermes"\n' "$MOCKS" >"$out"; exit 0 ;;
+  *hermes*install.sh) cat >"$out" <<EOS
+#!/bin/sh
+# installer Hermes tiruan: protokol --manifest / --stage
+case "\$1" in
+  --manifest) echo '{"protocol_version":1,"stages":[{"name":"prerequisites","title":"System prerequisites","category":"runtime","needs_user_input":false},{"name":"python-deps","title":"Install Python dependencies","category":"runtime","needs_user_input":false},{"name":"setup","title":"Configure","category":"configuration","needs_user_input":true},{"name":"complete","title":"Finish install","category":"runtime","needs_user_input":false}]}'; exit 0 ;;
+  --stage) echo "→ tahap \$2 mulai"; sleep \${MOCK_STAGE_SLEEP:-0}; echo "✓ tahap \$2 selesai"
+           [ "\$2" = "\${MOCK_FAIL_STAGE:-none}" ] && { echo "✗ gagal di \$2" >&2; exit 1; }
+           [ "\$2" = complete ] && { mkdir -p "\$HOME/.local/bin"; cp "$MOCKS/hermes" "\$HOME/.local/bin/hermes"; chmod +x "\$HOME/.local/bin/hermes"; }
+           exit 0 ;;
+esac
+mkdir -p "\$HOME/.local/bin"; cp "$MOCKS/hermes" "\$HOME/.local/bin/hermes"; chmod +x "\$HOME/.local/bin/hermes"
+EOS
+exit 0 ;;
   *ruang*install.sh) printf '#!/bin/sh\nmkdir -p "$HOME/.local/bin"; printf "#!/bin/sh\\necho ruang tiruan\\n" >"$HOME/.local/bin/ruang"; chmod +x "$HOME/.local/bin/ruang"\n' >"$out"; exit 0 ;;
   */bot*) tok=${url#*/bot}; tok=${tok%%/*}; m=${url##*/}
           [[ $tok == *BAD* ]] && exit 22
